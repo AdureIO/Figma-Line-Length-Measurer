@@ -1,0 +1,1009 @@
+<!doctype html>
+<html>
+	<head>
+		<style>
+			* {
+				box-sizing: border-box;
+				margin: 0;
+				padding: 0;
+			}
+			:root {
+				--bg: #161616;
+				--surface: #1f1f1f;
+				--surface2: #272727;
+				--border: #2e2e2e;
+				--accent: #ff5500;
+				--accent-dim: rgba(255, 85, 0, 0.12);
+				--text: #e8e8e8;
+				--text-dim: #888;
+				--text-muted: #555;
+				--radius: 5px;
+			}
+			html,
+			body {
+				width: 100%;
+				height: 100%;
+				background: var(--bg);
+				color: var(--text);
+				font-family: "Inter", system-ui, sans-serif;
+				font-size: 12px;
+				overflow-x: hidden;
+			}
+			.layout {
+				display: flex;
+				flex-direction: column;
+				height: 100vh;
+			}
+
+			.header {
+				padding: 13px 16px 10px;
+				border-bottom: 1px solid var(--border);
+				flex-shrink: 0;
+			}
+			.header-title {
+				font-size: 13px;
+				font-weight: 700;
+				color: var(--text);
+				display: flex;
+				align-items: center;
+				gap: 7px;
+			}
+			.header-icon {
+				width: 20px;
+				height: 20px;
+				background: var(--accent);
+				border-radius: 4px;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				font-size: 11px;
+				flex-shrink: 0;
+			}
+			.header-sub {
+				color: var(--text-muted);
+				font-size: 10px;
+				margin-top: 3px;
+				padding-left: 27px;
+			}
+
+			.nav {
+				display: flex;
+				border-bottom: 1px solid var(--border);
+				flex-shrink: 0;
+			}
+			.nav-item {
+				flex: 1;
+				padding: 9px 4px;
+				text-align: center;
+				cursor: pointer;
+				font-size: 10px;
+				font-weight: 600;
+				color: var(--text-muted);
+				letter-spacing: 0.6px;
+				text-transform: uppercase;
+				border-bottom: 2px solid transparent;
+				margin-bottom: -1px;
+				user-select: none;
+			}
+			.nav-item:hover {
+				color: var(--text-dim);
+			}
+			.nav-item.active {
+				color: var(--accent);
+				border-bottom-color: var(--accent);
+			}
+
+			.content {
+				flex: 1;
+				overflow-y: auto;
+				overflow-x: hidden;
+			}
+			.content::-webkit-scrollbar {
+				width: 4px;
+			}
+			.content::-webkit-scrollbar-thumb {
+				background: #333;
+				border-radius: 2px;
+			}
+			.panel {
+				display: none;
+				padding: 14px 16px;
+			}
+			.panel.active {
+				display: block;
+			}
+
+			.section {
+				background: var(--surface);
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				padding: 11px 12px;
+				margin-bottom: 10px;
+			}
+			.section-title {
+				font-size: 9px;
+				font-weight: 700;
+				color: var(--text-muted);
+				letter-spacing: 1px;
+				text-transform: uppercase;
+				margin-bottom: 9px;
+			}
+			.field {
+				margin-bottom: 10px;
+			}
+			.field:last-child {
+				margin-bottom: 0;
+			}
+			label {
+				display: block;
+				margin-bottom: 5px;
+				color: var(--text-dim);
+				font-size: 11px;
+			}
+			.row {
+				display: flex;
+				gap: 6px;
+				align-items: center;
+			}
+
+			input[type="number"],
+			input[type="text"] {
+				flex: 1;
+				background: var(--surface2);
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				color: var(--text);
+				padding: 7px 9px;
+				font-size: 12px;
+				outline: none;
+				min-width: 0;
+			}
+			input:focus {
+				border-color: var(--accent);
+			}
+			select {
+				width: 100%;
+				background: var(--surface2);
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				color: var(--text);
+				padding: 7px 9px;
+				font-size: 12px;
+				outline: none;
+				appearance: none;
+				-webkit-appearance: none;
+			}
+			select:focus {
+				border-color: var(--accent);
+			}
+			select option {
+				background: #222;
+				color: #e0e0e0;
+			}
+
+			.badge {
+				background: var(--surface2);
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				padding: 7px 10px;
+				font-size: 11px;
+				color: var(--text-dim);
+				white-space: nowrap;
+				flex-shrink: 0;
+			}
+
+			.color-row {
+				display: flex;
+				gap: 8px;
+				align-items: center;
+			}
+			input[type="color"] {
+				width: 38px;
+				height: 34px;
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				background: var(--surface2);
+				cursor: pointer;
+				padding: 3px;
+				flex-shrink: 0;
+			}
+			.color-hex {
+				flex: 1;
+				background: var(--surface2);
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				color: var(--text);
+				padding: 7px 9px;
+				font-size: 12px;
+				outline: none;
+				font-family: "Courier New", monospace;
+			}
+			.color-hex:focus {
+				border-color: var(--accent);
+			}
+
+			.mode-tabs {
+				display: flex;
+				gap: 5px;
+				margin-bottom: 10px;
+			}
+			.mode-tab {
+				flex: 1;
+				padding: 7px 5px;
+				text-align: center;
+				cursor: pointer;
+				font-size: 10px;
+				font-weight: 700;
+				letter-spacing: 0.4px;
+				border-radius: var(--radius);
+				border: 1px solid var(--border);
+				background: var(--surface2);
+				color: var(--text-muted);
+				user-select: none;
+			}
+			.mode-tab:hover {
+				color: var(--text-dim);
+			}
+			.mode-tab.active {
+				background: var(--accent-dim);
+				border-color: var(--accent);
+				color: var(--accent);
+			}
+			.place-tab {
+				flex: 1;
+				padding: 7px 5px;
+				text-align: center;
+				cursor: pointer;
+				font-size: 11px;
+				font-weight: 600;
+				border-radius: var(--radius);
+				border: 1px solid var(--border);
+				background: var(--surface2);
+				color: var(--text-muted);
+				user-select: none;
+			}
+			.place-tab:hover {
+				color: var(--text-dim);
+			}
+			.place-tab.active {
+				background: var(--accent-dim);
+				border-color: var(--accent);
+				color: var(--accent);
+			}
+
+			.palette-row {
+				display: flex;
+				gap: 4px;
+				flex-wrap: wrap;
+				margin-top: 8px;
+			}
+			.swatch {
+				width: 20px;
+				height: 20px;
+				border-radius: 3px;
+				border: 1px solid rgba(255, 255, 255, 0.08);
+				flex-shrink: 0;
+			}
+			#manualColors {
+				display: none;
+			}
+			#manualColors.visible {
+				display: block;
+			}
+
+			.btn {
+				display: block;
+				width: 100%;
+				padding: 9px 12px;
+				border-radius: var(--radius);
+				font-size: 11px;
+				font-weight: 700;
+				letter-spacing: 0.4px;
+				cursor: pointer;
+				border: none;
+				text-align: center;
+				margin-bottom: 7px;
+			}
+			.btn:last-child {
+				margin-bottom: 0;
+			}
+			.btn-primary {
+				background: var(--accent);
+				color: #fff;
+			}
+			.btn-primary:hover {
+				background: #e04900;
+			}
+			.btn-secondary {
+				background: var(--surface2);
+				color: var(--text-dim);
+				border: 1px solid var(--border);
+			}
+			.btn-secondary:hover {
+				background: #303030;
+			}
+
+			.status {
+				padding: 8px 10px;
+				border-radius: var(--radius);
+				font-size: 11px;
+				line-height: 1.5;
+				margin-top: 10px;
+			}
+			.status.ok {
+				background: #1a2e1a;
+				color: #7dbb7d;
+				border: 1px solid #2a3e2a;
+			}
+			.status.err {
+				background: #2e1a1a;
+				color: #bb7d7d;
+				border: 1px solid #3e2a2a;
+			}
+			.status.hidden {
+				display: none;
+			}
+
+			.scale-display {
+				background: var(--accent-dim);
+				border: 1px solid rgba(255, 85, 0, 0.25);
+				border-radius: var(--radius);
+				padding: 8px 10px;
+				font-size: 11px;
+				color: var(--accent);
+				font-weight: 600;
+				text-align: center;
+				margin-bottom: 10px;
+			}
+			.scale-display.unset {
+				background: var(--surface2);
+				border-color: var(--border);
+				color: var(--text-muted);
+				font-weight: 400;
+			}
+
+			.calib-item {
+				display: flex;
+				align-items: center;
+				gap: 7px;
+				padding: 7px 9px;
+				background: var(--surface2);
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+			}
+			.calib-item-name {
+				flex: 1;
+				font-size: 11px;
+				font-weight: 600;
+				color: var(--text);
+			}
+			.calib-item-scale {
+				font-size: 10px;
+				color: var(--text-muted);
+				font-family: monospace;
+			}
+			.calib-remove {
+				background: none;
+				border: none;
+				color: var(--text-muted);
+				cursor: pointer;
+				font-size: 14px;
+				padding: 0 2px;
+				line-height: 1;
+				flex-shrink: 0;
+			}
+			.calib-remove:hover {
+				color: #cc5555;
+			}
+
+			.preview-block {
+				margin-top: 10px;
+				background: var(--surface2);
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				padding: 10px 12px;
+				display: flex;
+				align-items: center;
+				gap: 10px;
+			}
+			.preview-line {
+				flex: 1;
+				height: 3px;
+				border-radius: 2px;
+				min-width: 40px;
+			}
+
+			.hint {
+				color: var(--text-muted);
+				font-size: 10px;
+				line-height: 1.5;
+				margin-top: 6px;
+			}
+			.divider {
+				height: 1px;
+				background: var(--border);
+				margin: 10px 0;
+			}
+			.footer {
+				padding: 10px 16px;
+				border-top: 1px solid var(--border);
+				flex-shrink: 0;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="layout">
+			<div class="header">
+				<div class="header-title">
+					<div class="header-icon">📏</div>
+					Line Length Measurer
+				</div>
+				<div class="header-sub">Draw lines with the Pen tool, then measure</div>
+			</div>
+
+			<div class="nav">
+				<div class="nav-item active" onclick="switchTab('measure')">Measure</div>
+				<div class="nav-item" onclick="switchTab('calibrate')">Calibrate</div>
+				<div class="nav-item" onclick="switchTab('settings')">Settings</div>
+			</div>
+
+			<div class="content">
+				<!-- MEASURE TAB -->
+				<div class="panel active" id="tab-measure">
+					<div id="scaleDisplay" class="scale-display unset">No scale set — go to Calibrate first</div>
+
+					<div class="section">
+						<div class="section-title">Actions</div>
+						<button class="btn btn-primary" onclick="measure()">📏 Measure selected line(s)</button>
+						<button class="btn btn-secondary" onclick="recalculateAll()">
+							↺ Recalculate all measured lines
+						</button>
+						<button class="btn btn-secondary" onclick="resetLabelPosition()">
+							⊙ Reset label position (selection)
+						</button>
+					</div>
+
+					<div class="section">
+						<div class="section-title">How it works</div>
+						<p class="hint">
+							1. Calibrate your scale in the Calibrate tab.<br /><br />
+							2. Draw routes with the <strong style="color: #aaa">Pen tool</strong> (multi-point
+							lines).<br /><br />
+							3. Select lines and click Measure. Labels appear as pills at the midpoint.<br /><br />
+							4. <strong style="color: #aaa">Drag labels freely</strong> — position is kept unless the
+							line shape changes.<br /><br />
+							5. Moving a line to a different frame auto-recalculates with that frame's scale.
+						</p>
+					</div>
+
+					<div id="measure-status" class="status hidden"></div>
+				</div>
+
+				<!-- CALIBRATE TAB -->
+				<div class="panel" id="tab-calibrate">
+					<div class="section">
+						<div class="section-title">Calibrate scale</div>
+						<p class="hint" style="margin-bottom: 10px">
+							Select a vector line drawn over a known distance, enter the real length, choose where to
+							save, then click Calculate.
+						</p>
+
+						<div class="field">
+							<label>Known distance</label>
+							<div class="row">
+								<input
+									type="number"
+									id="knownCm"
+									placeholder="e.g. 5000"
+									min="0.1"
+									step="0.1"
+									value="100"
+								/>
+								<div class="badge">cm</div>
+							</div>
+						</div>
+
+						<div class="field">
+							<label>Save to</label>
+							<select id="saveToSelect">
+								<option value="none">Don't save</option>
+								<option value="global" selected>Global (whole document)</option>
+							</select>
+						</div>
+
+						<button class="btn btn-primary" style="margin-top: 4px" onclick="doCalibrate()">
+							📐 Calculate &amp; save
+						</button>
+					</div>
+
+					<div class="section" id="savedCalibrationsSection" style="display: none">
+						<div class="section-title">Saved calibrations</div>
+						<div
+							id="savedCalibList"
+							style="display: flex; flex-direction: column; gap: 5px; margin-top: 2px"
+						></div>
+					</div>
+
+					<div id="calib-status" class="status hidden"></div>
+				</div>
+
+				<!-- SETTINGS TAB -->
+				<div class="panel" id="tab-settings">
+					<div class="section">
+						<div class="section-title">Color mode</div>
+						<div class="mode-tabs">
+							<div class="mode-tab active" id="modeTab-auto-dark" onclick="setColorMode('auto-dark')">
+								🌙 Auto dark
+							</div>
+							<div class="mode-tab" id="modeTab-auto-light" onclick="setColorMode('auto-light')">
+								☀️ Auto light
+							</div>
+							<div class="mode-tab" id="modeTab-manual" onclick="setColorMode('manual')">✏️ Manual</div>
+						</div>
+						<p class="hint" id="modeHint">Each new line gets a unique color. Best for dark backgrounds.</p>
+						<div id="palettePreview">
+							<div
+								style="font-size: 10px; color: var(--text-muted); margin-top: 10px; margin-bottom: 5px"
+							>
+								Palette preview
+							</div>
+							<div class="palette-row" id="paletteSwatches"></div>
+						</div>
+						<div id="manualColors">
+							<div class="divider"></div>
+							<div class="field">
+								<label>Line color</label>
+								<div class="color-row">
+									<input
+										type="color"
+										id="lineColorPicker"
+										value="#ff5500"
+										oninput="syncColor('line')"
+									/>
+									<input
+										type="text"
+										class="color-hex"
+										id="lineColorHex"
+										value="#ff5500"
+										maxlength="7"
+										oninput="syncColorHex('line')"
+									/>
+								</div>
+							</div>
+							<div class="field">
+								<label>Label color</label>
+								<div class="color-row">
+									<input
+										type="color"
+										id="labelColorPicker"
+										value="#ff5500"
+										oninput="syncColor('label')"
+									/>
+									<input
+										type="text"
+										class="color-hex"
+										id="labelColorHex"
+										value="#ff5500"
+										maxlength="7"
+										oninput="syncColorHex('label')"
+									/>
+								</div>
+							</div>
+						</div>
+					</div>
+
+					<div class="section">
+						<div class="section-title">Label font size</div>
+						<div class="row">
+							<input
+								type="number"
+								id="fontSize"
+								value="14"
+								min="8"
+								max="96"
+								step="1"
+								oninput="updatePreview()"
+							/>
+							<div class="badge">px</div>
+						</div>
+						<div class="divider"></div>
+						<label>Preview</label>
+						<div class="preview-block">
+							<div class="preview-line" id="previewLine" style="background: #e63946"></div>
+							<div
+								id="previewPill"
+								style="
+									padding: 3px 10px;
+									border-radius: 999px;
+									background: #e63946;
+									display: inline-block;
+								"
+							>
+								<span id="previewText" style="color: #fff; font-size: 13px; font-weight: 700"
+									>12.50 m</span
+								>
+							</div>
+						</div>
+					</div>
+
+					<div class="section">
+						<div class="section-title">Label position</div>
+						<p class="hint" style="margin-bottom: 8px">Where to place the label relative to the line.</p>
+						<div style="display: flex; gap: 5px">
+							<div class="place-tab active" id="placeTab-above" onclick="setPlacement('above')">
+								Above
+							</div>
+							<div class="place-tab" id="placeTab-center" onclick="setPlacement('center')">Center</div>
+							<div class="place-tab" id="placeTab-below" onclick="setPlacement('below')">Below</div>
+						</div>
+						<p class="hint" id="placeHint" style="margin-top: 6px">
+							Label is offset above the line, clear of the stroke width.
+						</p>
+					</div>
+
+					<div class="section">
+						<div class="section-title">Units</div>
+						<p class="hint">
+							Labels auto-scale: &lt;100 cm → cm, 100–99999 cm → m, ≥100000 cm → km. Always 2 decimal
+							places.
+						</p>
+					</div>
+				</div>
+			</div>
+
+			<div class="footer">
+				<button class="btn btn-secondary" style="margin: 0" onclick="recalculateAll()">
+					↺ Apply settings to all lines
+				</button>
+			</div>
+		</div>
+		<script>
+			// ── State ─────────────────────────────────────────────────────────────────────
+			var colorMode = "auto-dark";
+			var activePxPerCm = 0; // the currently active scale (from calibrations)
+			var labelPlacement = "above";
+
+			var PALETTES = {
+				"auto-dark": [
+					"#E63946",
+					"#2196F3",
+					"#4CAF50",
+					"#FF9800",
+					"#9C27B0",
+					"#00BCD4",
+					"#FFEB3B",
+					"#F06292",
+					"#8BC34A",
+					"#FF5722",
+				],
+				"auto-light": [
+					"#C62828",
+					"#1565C0",
+					"#2E7D32",
+					"#E65100",
+					"#6A1B9A",
+					"#00838F",
+					"#F9A825",
+					"#AD1457",
+					"#558B2F",
+					"#BF360C",
+				],
+			};
+
+			// ── Tabs ──────────────────────────────────────────────────────────────────────
+			function switchTab(name) {
+				document.querySelectorAll(".nav-item").forEach(function (t, i) {
+					t.classList.toggle("active", ["measure", "calibrate", "settings"][i] === name);
+				});
+				document.querySelectorAll(".panel").forEach(function (p) {
+					p.classList.toggle("active", p.id === "tab-" + name);
+				});
+				// When opening calibrate tab, refresh root groups
+				if (name === "calibrate") {
+					parent.postMessage({ pluginMessage: { type: "get-root-groups" } }, "*");
+				}
+			}
+
+			// ── Scale display ─────────────────────────────────────────────────────────────
+			function updateScaleDisplay(pxPerCm) {
+				activePxPerCm = parseFloat(pxPerCm) || 0;
+				var el = document.getElementById("scaleDisplay");
+				if (activePxPerCm > 0) {
+					el.textContent = "Scale: " + activePxPerCm.toFixed(4) + " px/cm";
+					el.classList.remove("unset");
+				} else {
+					el.textContent = "No scale set — go to Calibrate first";
+					el.classList.add("unset");
+				}
+			}
+
+			// ── Populate save-to dropdown ─────────────────────────────────────────────────
+			function populateSaveTo(rootGroups) {
+				var sel = document.getElementById("saveToSelect");
+				var cur = sel.value;
+				while (sel.options.length > 2) sel.remove(2);
+				if (rootGroups && rootGroups.length > 0) {
+					rootGroups.forEach(function (g) {
+						var opt = document.createElement("option");
+						opt.value = g.id;
+						opt.textContent =
+							g.name +
+							(g.hasScale && g.pxPerCm ? " — " + parseFloat(g.pxPerCm).toFixed(4) + " px/cm" : "");
+						sel.appendChild(opt);
+					});
+				}
+				// Restore selection if still available
+				for (var i = 0; i < sel.options.length; i++) {
+					if (sel.options[i].value === cur) {
+						sel.value = cur;
+						break;
+					}
+				}
+			}
+
+			// ── Render saved calibrations list ────────────────────────────────────────────
+			function renderSavedCalibrations(list) {
+				var section = document.getElementById("savedCalibrationsSection");
+				var container = document.getElementById("savedCalibList");
+				container.innerHTML = "";
+				var saved = (list || []).filter(function (c) {
+					return c.pxPerCm > 0;
+				});
+				if (saved.length === 0) {
+					section.style.display = "none";
+					return;
+				}
+				section.style.display = "block";
+
+				saved.forEach(function (cal) {
+					var item = document.createElement("div");
+					item.className = "calib-item";
+					item.innerHTML =
+						'<div class="calib-item-name">' +
+						esc(cal.name) +
+						"</div>" +
+						'<div class="calib-item-scale">' +
+						parseFloat(cal.pxPerCm).toFixed(4) +
+						" px/cm</div>" +
+						'<button class="calib-remove" title="Remove">✕</button>';
+					item.querySelector(".calib-remove").onclick = function (e) {
+						e.stopPropagation();
+						parent.postMessage({ pluginMessage: { type: "remove-calibration", id: cal.id } }, "*");
+					};
+					container.appendChild(item);
+				});
+
+				// Update active scale from global if set
+				var global = saved.find(function (c) {
+					return c.id === "global";
+				});
+				if (global && global.pxPerCm > 0) updateScaleDisplay(global.pxPerCm);
+			}
+
+			function esc(s) {
+				return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+			}
+
+			// ── Calibrate ─────────────────────────────────────────────────────────────────
+			function doCalibrate() {
+				var cm = parseFloat(document.getElementById("knownCm").value);
+				if (!cm || cm <= 0) {
+					showStatus("calib-status", "⚠ Enter a valid known distance first.", "err");
+					return;
+				}
+				var saveTo = document.getElementById("saveToSelect").value;
+				showStatus("calib-status", "Calculating…", "ok");
+				parent.postMessage({ pluginMessage: { type: "calibrate", saveTo: saveTo, knownCm: cm } }, "*");
+			}
+
+			// ── Measure actions ───────────────────────────────────────────────────────────
+			function getSettings() {
+				return {
+					pxPerCm: activePxPerCm,
+					colorMode: colorMode,
+					labelColor: document.getElementById("labelColorHex").value || "#ff5500",
+					lineColor: document.getElementById("lineColorHex").value || "#ff5500",
+					fontSize: parseInt(document.getElementById("fontSize").value) || 14,
+					labelPlacement: labelPlacement,
+				};
+			}
+
+			function measure() {
+				if (!activePxPerCm || activePxPerCm <= 0) {
+					showStatus("measure-status", "⚠ No scale set — calibrate first.", "err");
+					return;
+				}
+				var s = getSettings();
+				parent.postMessage(
+					{
+						pluginMessage: {
+							type: "measure",
+							pxPerCm: s.pxPerCm,
+							colorMode: s.colorMode,
+							labelColor: s.labelColor,
+							lineColor: s.lineColor,
+							fontSize: s.fontSize,
+						},
+					},
+					"*",
+				);
+			}
+
+			function recalculateAll() {
+				if (!activePxPerCm || activePxPerCm <= 0) {
+					showStatus("measure-status", "⚠ No scale set — calibrate first.", "err");
+					switchTab("measure");
+					return;
+				}
+				var s = getSettings();
+				parent.postMessage(
+					{
+						pluginMessage: {
+							type: "recalculate-all",
+							pxPerCm: s.pxPerCm,
+							colorMode: s.colorMode,
+							labelColor: s.labelColor,
+							lineColor: s.lineColor,
+							fontSize: s.fontSize,
+						},
+					},
+					"*",
+				);
+			}
+
+			function resetLabelPosition() {
+				parent.postMessage({ pluginMessage: { type: "reset-label-position" } }, "*");
+			}
+
+			// ── Color mode ────────────────────────────────────────────────────────────────
+			function setPlacement(p) {
+				labelPlacement = p;
+				document.querySelectorAll(".place-tab").forEach(function (t) {
+					t.classList.remove("active");
+				});
+				document.getElementById("placeTab-" + p).classList.add("active");
+				var hints = {
+					above: "Label is offset above the line, clear of the stroke width.",
+					center: "Label sits centered on the line (pill covers the stroke).",
+					below: "Label is offset below the line, clear of the stroke width.",
+				};
+				document.getElementById("placeHint").textContent = hints[p];
+			}
+
+			function setColorMode(mode) {
+				colorMode = mode;
+				document.querySelectorAll(".mode-tab").forEach(function (t) {
+					t.classList.remove("active");
+				});
+				document.getElementById("modeTab-" + mode).classList.add("active");
+				var hints = {
+					"auto-dark": "Each new line gets a unique color. Best for dark backgrounds.",
+					"auto-light": "Each new line gets a unique darker color. Best for light backgrounds.",
+					manual: "All lines and labels use the colors you specify below.",
+				};
+				document.getElementById("modeHint").textContent = hints[mode];
+				var isManual = mode === "manual";
+				document.getElementById("manualColors").classList.toggle("visible", isManual);
+				document.getElementById("palettePreview").style.display = isManual ? "none" : "block";
+				if (!isManual) updatePalettePreview();
+				updatePreview();
+			}
+
+			function updatePalettePreview() {
+				var palette = PALETTES[colorMode] || PALETTES["auto-dark"];
+				var c = document.getElementById("paletteSwatches");
+				c.innerHTML = "";
+				palette.forEach(function (hex) {
+					var s = document.createElement("div");
+					s.className = "swatch";
+					s.style.background = hex;
+					c.appendChild(s);
+				});
+				updatePreview();
+			}
+
+			function syncColor(type) {
+				document.getElementById(type + "ColorHex").value = document.getElementById(type + "ColorPicker").value;
+				updatePreview();
+			}
+			function syncColorHex(type) {
+				var hex = document.getElementById(type + "ColorHex").value;
+				if (/^#[0-9a-fA-F]{6}$/.test(hex)) {
+					document.getElementById(type + "ColorPicker").value = hex;
+					updatePreview();
+				}
+			}
+
+			function getLuminance(hex) {
+				var c = hex.replace("#", "");
+				return (
+					(0.299 * parseInt(c.substring(0, 2), 16)) / 255 +
+					(0.587 * parseInt(c.substring(2, 4), 16)) / 255 +
+					(0.114 * parseInt(c.substring(4, 6), 16)) / 255
+				);
+			}
+
+			function updatePreview() {
+				var color =
+					colorMode === "manual"
+						? document.getElementById("lineColorHex").value || "#ff5500"
+						: (PALETTES[colorMode] || PALETTES["auto-dark"])[0];
+				var fontSize = Math.max(10, Math.min(20, parseInt(document.getElementById("fontSize").value) || 14));
+				var textColor = getLuminance(color) > 0.55 ? "#1a1a1a" : "#ffffff";
+				document.getElementById("previewLine").style.background = color;
+				document.getElementById("previewPill").style.background = color;
+				document.getElementById("previewText").style.color = textColor;
+				document.getElementById("previewText").style.fontSize = fontSize + "px";
+			}
+
+			// ── Status ────────────────────────────────────────────────────────────────────
+			function showStatus(id, text, type) {
+				var el = document.getElementById(id);
+				if (!el) return;
+				el.textContent = text;
+				el.className = "status " + type;
+			}
+
+			// ── Message handler ───────────────────────────────────────────────────────────
+			window.onmessage = function (event) {
+				var msg = event.data.pluginMessage;
+				if (!msg) return;
+
+				if (msg.type === "restored") {
+					if (msg.globalScale && msg.globalScale > 0) updateScaleDisplay(msg.globalScale);
+					if (msg.calibrations && msg.calibrations.length > 0) renderSavedCalibrations(msg.calibrations);
+					if (msg.rootGroups) populateSaveTo(msg.rootGroups);
+					if (msg.lineCount > 0)
+						showStatus("measure-status", "↺ Restored " + msg.lineCount + " tracked line(s).", "ok");
+				}
+
+				if (msg.type === "calibrations") {
+					renderSavedCalibrations(msg.list);
+					// Also update scale if global changed
+					var g = (msg.list || []).find(function (c) {
+						return c.id === "global";
+					});
+					if (g && g.pxPerCm > 0) updateScaleDisplay(g.pxPerCm);
+				}
+
+				if (msg.type === "root-groups") {
+					populateSaveTo(msg.groups);
+				}
+
+				if (msg.type === "calibrated") {
+					updateScaleDisplay(msg.pxPerCm);
+					if (msg.calibrations) renderSavedCalibrations(msg.calibrations);
+					var savedMsg =
+						msg.savedTo && msg.savedTo !== "none"
+							? ' — saved to "' + esc(msg.savedTo) + '"'
+							: " (not saved)";
+					showStatus("calib-status", "✓ " + parseFloat(msg.pxPerCm).toFixed(4) + " px/cm" + savedMsg, "ok");
+					setTimeout(function () {
+						switchTab("measure");
+						showStatus(
+							"measure-status",
+							"✓ Scale: " + parseFloat(msg.pxPerCm).toFixed(4) + " px/cm — ready.",
+							"ok",
+						);
+					}, 1200);
+				}
+
+				if (msg.type === "result") {
+					showStatus("measure-status", msg.text, "ok");
+					if (document.querySelector(".panel.active").id !== "tab-measure") switchTab("measure");
+				}
+
+				if (msg.type === "error") {
+					var active = document.querySelector(".panel.active");
+					var statusId = active.id === "tab-calibrate" ? "calib-status" : "measure-status";
+					showStatus(statusId, "⚠ " + msg.text, "err");
+				}
+			};
+
+			// ── Init ──────────────────────────────────────────────────────────────────────
+			updatePalettePreview();
+			updatePreview();
+			parent.postMessage({ pluginMessage: { type: "ui-ready" } }, "*");
+		</script>
+	</body>
+</html>
