@@ -41,6 +41,8 @@ var lineColorIndex = 0;
 var measuredLines = {}; // runtime cache: nodeId -> entry
 var suppressedChangeIds = {};
 var pendingRestoreData = null;
+var elevationVisualsGeneration = 0;
+var elevationVisualsSyncChain = Promise.resolve();
 var DEFAULT_UI_SETTINGS = {
 	colorMode: "auto-dark",
 	lineColor: "#ff5500",
@@ -48,7 +50,21 @@ var DEFAULT_UI_SETTINGS = {
 	fontSize: 14,
 	labelPlacement: "above",
 	lineWidth: 8,
+	showPointMarkers: true,
+	elevationDisplayAtPoints: true,
+	showHeightBadges: false,
+	showDiffBadges: true,
+	showSlopeBadges: true,
 };
+
+function readBoolSetting(parsed, key, defaultValue) {
+	if (!parsed || !Object.prototype.hasOwnProperty.call(parsed, key)) return defaultValue;
+	return !!parsed[key];
+}
+
+function saveBoolSetting(value, defaultValue) {
+	return typeof value === "boolean" ? value : defaultValue;
+}
 
 function readUiSettings() {
 	var raw = figma.root.getPluginData("uiSettings");
@@ -76,6 +92,15 @@ function readUiSettings() {
 					? parsed.labelPlacement
 					: DEFAULT_UI_SETTINGS.labelPlacement,
 			lineWidth: Math.max(1, Math.min(64, parseFloat(parsed.lineWidth) || DEFAULT_UI_SETTINGS.lineWidth)),
+			showPointMarkers: readBoolSetting(parsed, "showPointMarkers", DEFAULT_UI_SETTINGS.showPointMarkers),
+			elevationDisplayAtPoints: readBoolSetting(
+				parsed,
+				"elevationDisplayAtPoints",
+				DEFAULT_UI_SETTINGS.elevationDisplayAtPoints,
+			),
+			showHeightBadges: readBoolSetting(parsed, "showHeightBadges", DEFAULT_UI_SETTINGS.showHeightBadges),
+			showDiffBadges: readBoolSetting(parsed, "showDiffBadges", DEFAULT_UI_SETTINGS.showDiffBadges),
+			showSlopeBadges: readBoolSetting(parsed, "showSlopeBadges", DEFAULT_UI_SETTINGS.showSlopeBadges),
 		};
 	} catch (e) {
 		return DEFAULT_UI_SETTINGS;
@@ -104,8 +129,30 @@ function saveUiSettings(settings) {
 				? settings.labelPlacement
 				: DEFAULT_UI_SETTINGS.labelPlacement,
 		lineWidth: Math.max(1, Math.min(64, parseFloat(settings.lineWidth) || DEFAULT_UI_SETTINGS.lineWidth)),
+		showPointMarkers: saveBoolSetting(settings.showPointMarkers, DEFAULT_UI_SETTINGS.showPointMarkers),
+		elevationDisplayAtPoints: saveBoolSetting(
+			settings.elevationDisplayAtPoints,
+			DEFAULT_UI_SETTINGS.elevationDisplayAtPoints,
+		),
+		showHeightBadges: saveBoolSetting(settings.showHeightBadges, DEFAULT_UI_SETTINGS.showHeightBadges),
+		showDiffBadges: saveBoolSetting(settings.showDiffBadges, DEFAULT_UI_SETTINGS.showDiffBadges),
+		showSlopeBadges: saveBoolSetting(settings.showSlopeBadges, DEFAULT_UI_SETTINGS.showSlopeBadges),
 	};
 	figma.root.setPluginData("uiSettings", JSON.stringify(safe));
+}
+
+function ensureEntryDefaults(entry) {
+	if (!entry || typeof entry !== "object") return entry;
+	if (!entry.elevationsCmByPointIndex || typeof entry.elevationsCmByPointIndex !== "object") {
+		entry.elevationsCmByPointIndex = {};
+	}
+	if (!entry.pointHeightsByPointIndex || typeof entry.pointHeightsByPointIndex !== "object") {
+		entry.pointHeightsByPointIndex = {};
+	}
+	if (!Array.isArray(entry.pointMarkerIds)) entry.pointMarkerIds = [];
+	if (!Array.isArray(entry.heightBadgeIds)) entry.heightBadgeIds = [];
+	if (!Array.isArray(entry.slopeBadgeIds)) entry.slopeBadgeIds = [];
+	return entry;
 }
 
 function suppressNodeChanges(ids) {
@@ -149,6 +196,7 @@ async function init() {
 						var raw = node.getPluginData("lineEntry");
 						if (raw) {
 							var entry = JSON.parse(raw);
+							ensureEntryDefaults(entry);
 							measuredLines[nodeId] = entry;
 						}
 					}
@@ -158,6 +206,7 @@ async function init() {
 			}
 		} catch (e) {}
 	}
+	await scheduleSyncElevationVisuals();
 
 	// 3. Send restored state + calibrations list to UI
 	var calibrations = await getNodeScalesList();
@@ -210,6 +259,7 @@ function saveLineColorIndex() {
 }
 
 function saveMeasuredLine(nodeId, entry) {
+	ensureEntryDefaults(entry);
 	measuredLines[nodeId] = entry;
 	// Save entry on the vector node itself
 	try {
@@ -222,7 +272,19 @@ function saveMeasuredLine(nodeId, entry) {
 }
 
 function removeMeasuredLine(nodeId) {
+	var old = measuredLines[nodeId];
 	delete measuredLines[nodeId];
+	if (old) {
+		var markerIds = (old.pointMarkerIds || []).concat(old.heightBadgeIds || []).concat(old.slopeBadgeIds || []);
+		for (var mi = 0; mi < markerIds.length; mi++) {
+			var markerId = markerIds[mi];
+			try {
+				figma.getNodeByIdAsync(markerId).then(function (n) {
+					if (n) n.remove();
+				});
+			} catch (e0) {}
+		}
+	}
 	try {
 		figma.getNodeByIdAsync(nodeId).then(function (node) {
 			if (node) node.setPluginData("lineEntry", "");
@@ -328,6 +390,217 @@ function postSelectionScaleInfo() {
 	figma.ui.postMessage({ type: "scale-info", pxPerCm: info.pxPerCm, source: info.source });
 }
 
+async function getElevationDataForSelection() {
+	var out = [];
+	var ids = collectMeasuredVectorIdsFromSelection(figma.currentPage.selection);
+	for (var i = 0; i < ids.length; i++) {
+		var vectorId = ids[i];
+		var entry = measuredLines[vectorId];
+		if (!entry) continue;
+		ensureEntryDefaults(entry);
+		try {
+			var n = await figma.getNodeByIdAsync(vectorId);
+			if (!n || n.type !== "VECTOR") continue;
+			sanitizePointHeightsForLine(entry, n);
+			out.push({
+				vectorId: vectorId,
+				name: n.name || "Line",
+				pointCount: n.vectorNetwork && n.vectorNetwork.vertices ? n.vectorNetwork.vertices.length : 0,
+				pointHeightsByPointIndex: entry.pointHeightsByPointIndex,
+			});
+		} catch (e) {}
+	}
+	return out;
+}
+
+async function hideAllElevationMarkers() {
+	var keys = Object.keys(measuredLines);
+	for (var i = 0; i < keys.length; i++) {
+		var entry = measuredLines[keys[i]];
+		if (!entry) continue;
+		ensureEntryDefaults(entry);
+		await removePointMarkers(entry);
+		await removeHeightBadges(entry);
+		await removeSlopeBadges(entry);
+		saveMeasuredLine(keys[i], entry);
+	}
+}
+
+/** P markers for selected vector, label, or plugin line group (not all lines in a parent frame). */
+function collectPointMarkerVectorIdsFromSelection(selection) {
+	var out = {};
+	var selectedIds = {};
+	for (var si = 0; si < selection.length; si++) selectedIds[selection[si].id] = true;
+
+	var measuredIds = Object.keys(measuredLines);
+	for (var mi = 0; mi < measuredIds.length; mi++) {
+		var vid = measuredIds[mi];
+		var entry = measuredLines[vid];
+		if (!entry) continue;
+		if (selectedIds[vid]) {
+			out[vid] = true;
+			continue;
+		}
+		if (entry.groupId && selectedIds[entry.groupId]) {
+			out[vid] = true;
+			continue;
+		}
+		if (entry.pillId && selectedIds[entry.pillId]) {
+			out[vid] = true;
+			continue;
+		}
+		if (entry.textId && selectedIds[entry.textId]) {
+			out[vid] = true;
+			continue;
+		}
+	}
+
+	for (var i = 0; i < selection.length; i++) {
+		var n = selection[i];
+		if (n.type === "VECTOR" && measuredLines[n.id]) out[n.id] = true;
+		if (n.getPluginData && n.getPluginData("pluginGroup") === "1" && typeof n.findAll === "function") {
+			var vectors = n.findAll(function (child) {
+				return child.type === "VECTOR" && !!measuredLines[child.id];
+			});
+			for (var vi = 0; vi < vectors.length; vi++) out[vectors[vi].id] = true;
+		}
+	}
+	return Object.keys(out);
+}
+
+function scheduleSyncElevationVisuals() {
+	elevationVisualsSyncChain = elevationVisualsSyncChain
+		.catch(function () {
+			return undefined;
+		})
+		.then(function () {
+			return syncElevationVisuals();
+		});
+	return elevationVisualsSyncChain;
+}
+
+async function removeAllPointMarkersFromPage() {
+	var markers = figma.currentPage.findAll(function (n) {
+		if (!n.getPluginData) return false;
+		if (n.getPluginData("pluginElevationPoint") === "1") return true;
+		if (n.getPluginData("pluginElevationPointInfo") === "1") return true;
+		// Legacy point circles (before pluginElevationPoint tag)
+		return (
+			n.type === "FRAME" &&
+			n.getPluginData("pluginElevationMarker") === "1" &&
+			Math.abs(n.width - 24) < 0.01 &&
+			Math.abs(n.height - 24) < 0.01
+		);
+	});
+	for (var i = 0; i < markers.length; i++) {
+		try {
+			markers[i].remove();
+		} catch (e) {}
+	}
+	var keys = Object.keys(measuredLines);
+	for (var k = 0; k < keys.length; k++) {
+		var entry = measuredLines[keys[k]];
+		if (!entry) continue;
+		ensureEntryDefaults(entry);
+		entry.pointMarkerIds = [];
+		saveMeasuredLine(keys[k], entry);
+	}
+}
+
+async function syncElevationVisuals() {
+	var gen = ++elevationVisualsGeneration;
+	var keys = Object.keys(measuredLines);
+
+	await removeAllPointMarkersFromPage();
+	await removeAllHeightBadgesFromPage();
+	if (gen !== elevationVisualsGeneration) return;
+
+	var settings = readUiSettings();
+	var atPoints = settings.elevationDisplayAtPoints;
+	var selectedIds = collectPointMarkerVectorIdsFromSelection(figma.currentPage.selection);
+	var selectedSet = {};
+	for (var si = 0; si < selectedIds.length; si++) selectedSet[selectedIds[si]] = true;
+
+	if (atPoints) {
+		for (var ai = 0; ai < keys.length; ai++) {
+			if (gen !== elevationVisualsGeneration) return;
+			var aId = keys[ai];
+			var aEntry = measuredLines[aId];
+			if (!aEntry) continue;
+			try {
+				var aVector = await figma.getNodeByIdAsync(aId);
+				if (!aVector || aVector.type !== "VECTOR") continue;
+				var showP = settings.showPointMarkers !== false && !!selectedSet[aId];
+				await renderPointInfoForLine(aVector, aEntry, showP, gen);
+				if (gen !== elevationVisualsGeneration) return;
+				saveMeasuredLine(aId, aEntry);
+			} catch (e) {}
+		}
+	} else {
+		if (settings.showPointMarkers !== false) {
+			for (var pi = 0; pi < selectedIds.length; pi++) {
+				if (gen !== elevationVisualsGeneration) return;
+				var pointVectorId = selectedIds[pi];
+				var pointEntry = measuredLines[pointVectorId];
+				if (!pointEntry) continue;
+				try {
+					var pointVector = await figma.getNodeByIdAsync(pointVectorId);
+					if (!pointVector || pointVector.type !== "VECTOR") continue;
+					await renderPointMarkersForLine(pointVector, pointEntry, gen);
+					if (gen !== elevationVisualsGeneration) return;
+					saveMeasuredLine(pointVectorId, pointEntry);
+				} catch (e) {}
+			}
+		}
+
+		for (var bi = 0; bi < keys.length; bi++) {
+			if (gen !== elevationVisualsGeneration) return;
+			var vectorId = keys[bi];
+			var entry = measuredLines[vectorId];
+			if (!entry) continue;
+			ensureEntryDefaults(entry);
+			try {
+				var v = await figma.getNodeByIdAsync(vectorId);
+				if (!v || v.type !== "VECTOR") continue;
+				await renderHeightBadgesForLine(v, entry);
+				saveMeasuredLine(vectorId, entry);
+			} catch (e) {}
+		}
+	}
+
+	if (settings.showSlopeBadges) {
+		for (var slopeIdx = 0; slopeIdx < keys.length; slopeIdx++) {
+			if (gen !== elevationVisualsGeneration) return;
+			var slopeVectorId = keys[slopeIdx];
+			var slopeEntry = measuredLines[slopeVectorId];
+			if (!slopeEntry) continue;
+			ensureEntryDefaults(slopeEntry);
+			try {
+				var slopeVector = await figma.getNodeByIdAsync(slopeVectorId);
+				if (!slopeVector || slopeVector.type !== "VECTOR") continue;
+				await renderSlopeBadgesForLine(slopeVector, slopeEntry);
+				saveMeasuredLine(slopeVectorId, slopeEntry);
+			} catch (e) {}
+		}
+	}
+
+	if (gen === elevationVisualsGeneration) {
+		bringElevationVisualsToFront();
+	}
+}
+
+async function postSelectionElevationInfo() {
+	figma.ui.postMessage({
+		type: "elevation-data",
+		lines: await getElevationDataForSelection(),
+		showPointMarkers: readUiSettings().showPointMarkers,
+		elevationDisplayAtPoints: readUiSettings().elevationDisplayAtPoints,
+		showHeightBadges: readUiSettings().showHeightBadges,
+		showDiffBadges: readUiSettings().showDiffBadges,
+		showSlopeBadges: readUiSettings().showSlopeBadges,
+	});
+}
+
 function collectMeasuredVectorIdsFromSelection(selection) {
 	var out = {};
 	var measuredIds = Object.keys(measuredLines);
@@ -360,6 +633,7 @@ function collectMeasuredVectorIdsFromSelection(selection) {
 // ── Document change handler ───────────────────────────────────────────────────
 
 async function handleDocumentChange(event) {
+	var markersNeedRefresh = false;
 	for (var i = 0; i < event.documentChanges.length; i++) {
 		var change = event.documentChanges[i];
 		var nodeId = change.id;
@@ -386,6 +660,7 @@ async function handleDocumentChange(event) {
 					entry.labelManuallyMoved = false;
 					await updateLabel(vectorNode, labelNode, entry, true);
 					saveMeasuredLine(nodeId, entry);
+					markersNeedRefresh = true;
 				} else {
 					await updateLabel(vectorNode, labelNode, entry, false);
 				}
@@ -407,10 +682,17 @@ async function handleDocumentChange(event) {
 			}
 		}
 	}
+	if (markersNeedRefresh) {
+		await scheduleSyncElevationVisuals();
+		await postSelectionElevationInfo();
+	}
 }
 
 figma.on("selectionchange", function () {
 	postSelectionScaleInfo();
+	scheduleSyncElevationVisuals().then(function () {
+		postSelectionElevationInfo();
+	});
 });
 
 // ── Message handler ───────────────────────────────────────────────────────────
@@ -451,10 +733,80 @@ figma.ui.onmessage = async function (msg) {
 			});
 		}
 		postSelectionScaleInfo();
+		await postSelectionElevationInfo();
 	}
 
 	if (msg.type === "save-settings") {
 		saveUiSettings(msg.settings || {});
+		if (
+			msg.settings &&
+			(typeof msg.settings.showPointMarkers !== "undefined" ||
+				typeof msg.settings.elevationDisplayAtPoints !== "undefined" ||
+				typeof msg.settings.showHeightBadges !== "undefined" ||
+				typeof msg.settings.showDiffBadges !== "undefined" ||
+				typeof msg.settings.showSlopeBadges !== "undefined")
+		) {
+			await scheduleSyncElevationVisuals();
+		}
+	}
+
+	if (msg.type === "get-elevation-data") {
+		figma.ui.postMessage({
+			type: "elevation-data",
+			lines: await getElevationDataForSelection(),
+			showPointMarkers: readUiSettings().showPointMarkers !== false,
+			elevationDisplayAtPoints: readUiSettings().elevationDisplayAtPoints,
+			showHeightBadges: readUiSettings().showHeightBadges,
+			showDiffBadges: readUiSettings().showDiffBadges,
+			showSlopeBadges: readUiSettings().showSlopeBadges,
+		});
+	}
+
+	if (msg.type === "set-point-elevations") {
+		var updates = msg.updates || {};
+		var lineIds = Object.keys(updates);
+		for (var ui = 0; ui < lineIds.length; ui++) {
+			var lineId = lineIds[ui];
+			var entry = measuredLines[lineId];
+			if (!entry) continue;
+			try {
+				var vNode = await figma.getNodeByIdAsync(lineId);
+				if (!vNode || vNode.type !== "VECTOR") continue;
+				ensureEntryDefaults(entry);
+				var merged = Object.assign({}, entry.pointHeightsByPointIndex || {});
+				var incoming = updates[lineId] || {};
+				var inKeys = Object.keys(incoming);
+				for (var ik = 0; ik < inKeys.length; ik++) {
+					if (incoming[inKeys[ik]] == null) delete merged[inKeys[ik]];
+					else merged[inKeys[ik]] = incoming[inKeys[ik]];
+				}
+				entry.pointHeightsByPointIndex = merged;
+				entry.elevationsCmByPointIndex = {};
+				sanitizePointHeightsForLine(entry, vNode);
+				var lNode = await figma.getNodeByIdAsync(entry.pillId || entry.textId);
+				if (lNode) await updateLabel(vNode, lNode, entry, !entry.labelManuallyMoved);
+				saveMeasuredLine(lineId, entry);
+			} catch (e) {}
+		}
+		await scheduleSyncElevationVisuals();
+		await postSelectionElevationInfo();
+		figma.ui.postMessage({ type: "result", text: "✓ Elevations updated" });
+	}
+
+	if (msg.type === "toggle-point-markers") {
+		var s = readUiSettings();
+		s.showPointMarkers = msg.show !== false;
+		saveUiSettings(s);
+		await scheduleSyncElevationVisuals();
+		figma.ui.postMessage({
+			type: "elevation-data",
+			lines: await getElevationDataForSelection(),
+			showPointMarkers: s.showPointMarkers,
+			elevationDisplayAtPoints: s.elevationDisplayAtPoints,
+			showHeightBadges: s.showHeightBadges,
+			showDiffBadges: s.showDiffBadges,
+			showSlopeBadges: s.showSlopeBadges,
+		});
 	}
 
 	// ── Measure ──────────────────────────────────────────────
@@ -519,7 +871,7 @@ figma.ui.onmessage = async function (msg) {
 						if (shouldReposition) movedLabelIds.push(exLabel.id);
 						saveMeasuredLine(node.id, ex);
 						results.push(
-							formatLength(pathLength / usedScale) +
+							formatLength(getDisplayedLengthCm(node, ex)) +
 								(scaleInfo.source !== "global" ? " [" + scaleInfo.source + "]" : ""),
 						);
 						continue;
@@ -531,7 +883,9 @@ figma.ui.onmessage = async function (msg) {
 			if (colorMode !== "manual") lineColorIndex++;
 			saveLineColorIndex();
 
-			var labelText = formatLength(pathLength / usedScale);
+			var labelText = formatLength(
+				getDisplayedLengthCm(node, { pxPerCm: usedScale, elevationsCmByPointIndex: {} }),
+			);
 
 			// Keep the original parent so the line stays in its frame/group
 			var originalParent = node.parent || figma.currentPage;
@@ -562,12 +916,22 @@ figma.ui.onmessage = async function (msg) {
 				labelManuallyMoved: false,
 				labelPlacement: labelPlacement,
 				lineWidth: lineWidth,
+				pointHeightsByPointIndex: {},
+				elevationsCmByPointIndex: {},
+				pointMarkerIds: [],
+				heightBadgeIds: [],
+				slopeBadgeIds: [],
 				colorIndex: colorMode !== "manual" ? lineColorIndex - 1 : -1,
 			};
 			saveMeasuredLine(node.id, newEntry);
-			results.push(labelText + (scaleInfo.source !== "global" ? " [" + scaleInfo.source + "]" : ""));
+			results.push(
+				formatLength(getDisplayedLengthCm(node, newEntry)) +
+					(scaleInfo.source !== "global" ? " [" + scaleInfo.source + "]" : ""),
+			);
 		}
 		await relaxMovableLabelOverlaps(movedLabelIds, 3);
+		await scheduleSyncElevationVisuals();
+		await postSelectionElevationInfo();
 
 		figma.ui.postMessage({ type: "result", text: "✓ Measured: " + results.join(" · ") });
 	}
@@ -790,7 +1154,7 @@ figma.ui.onmessage = async function (msg) {
 
 					if (entry.groupId) {
 						var grp = await figma.getNodeByIdAsync(entry.groupId);
-						if (grp) grp.name = "Line: " + formatLength(newLen / entry.pxPerCm);
+						if (grp) grp.name = "Line: " + formatLength(getDisplayedLengthCm(vNode, entry));
 					}
 					count++;
 				} else {
@@ -823,6 +1187,7 @@ figma.ui.onmessage = async function (msg) {
 		}
 		await relaxMovableLabelOverlaps(movedLabelIds, 4);
 		figma.ui.postMessage({ type: "result", text: "✓ Updated " + count + " line(s)" });
+		await scheduleSyncElevationVisuals();
 	}
 
 	// ── Reset label position ──────────────────────────────────
@@ -862,6 +1227,8 @@ figma.ui.onmessage = async function (msg) {
 			}
 		}
 		await relaxMovableLabelOverlaps(movedLabelIds, 4);
+		await scheduleSyncElevationVisuals();
+		await postSelectionElevationInfo();
 		figma.ui.postMessage({ type: "result", text: "✓ Label position reset" });
 	}
 };
@@ -869,7 +1236,7 @@ figma.ui.onmessage = async function (msg) {
 // ── Update label ──────────────────────────────────────────────────────────────
 
 async function updateLabel(vectorNode, pillOrText, entry, reposition) {
-	var totalCm = getTotalPathLength(vectorNode) / entry.pxPerCm;
+	var totalCm = getDisplayedLengthCm(vectorNode, entry);
 	var labelText = formatLength(totalCm);
 
 	// Support both pill (new) and plain text (legacy) labels
@@ -897,6 +1264,12 @@ async function updateLabel(vectorNode, pillOrText, entry, reposition) {
 		pillOrText.fills = [{ type: "SOLID", color: hexToRgb(entry.labelColor) }];
 		if (reposition) positionLabelParallel(vectorNode, pillOrText, entry.labelPlacement);
 		unsuppressNodeChanges(pillOrText.id);
+	}
+	if (entry.groupId) {
+		try {
+			var grp = await figma.getNodeByIdAsync(entry.groupId);
+			if (grp) grp.name = "Line: " + labelText;
+		} catch (e2) {}
 	}
 }
 
@@ -1368,6 +1741,596 @@ function positionLabelParallel(vectorNode, textNode, placement) {
 }
 
 // ── Path length ───────────────────────────────────────────────────────────────
+
+function getVectorPointsInParentSpace(vectorNode) {
+	var net = vectorNode.vectorNetwork;
+	if (!net || !net.vertices) return [];
+	var rt = vectorNode.relativeTransform;
+	var a = rt[0][0];
+	var c = rt[0][1];
+	var e = rt[0][2];
+	var b = rt[1][0];
+	var d = rt[1][1];
+	var f = rt[1][2];
+	var out = [];
+	for (var i = 0; i < net.vertices.length; i++) {
+		var v = net.vertices[i];
+		out.push({
+			index: i,
+			x: a * v.x + c * v.y + e,
+			y: b * v.x + d * v.y + f,
+		});
+	}
+	return out;
+}
+
+function migrateLegacyPointHeights(entry) {
+	ensureEntryDefaults(entry);
+	var legacy = entry.elevationsCmByPointIndex || {};
+	var legacyKeys = Object.keys(legacy);
+	for (var li = 0; li < legacyKeys.length; li++) {
+		if (entry.pointHeightsByPointIndex[legacyKeys[li]]) continue;
+		var val = parseFloat(legacy[legacyKeys[li]]);
+		if (!isFinite(val)) continue;
+		entry.pointHeightsByPointIndex[legacyKeys[li]] = { startCm: val, endCm: val };
+	}
+	var keys = Object.keys(entry.pointHeightsByPointIndex || {});
+	for (var i = 0; i < keys.length; i++) {
+		var item = entry.pointHeightsByPointIndex[keys[i]];
+		if (!item || typeof item !== "object") continue;
+		if (item.startCm != null || item.endCm != null) continue;
+		if (item.mode === "elevation" && isFinite(parseFloat(item.valueCm))) {
+			var h = parseFloat(item.valueCm);
+			entry.pointHeightsByPointIndex[keys[i]] = { startCm: h, endCm: h };
+		} else if (item.mode === "vertical") {
+			var from = parseFloat(item.fromCm);
+			var to = parseFloat(item.toCm);
+			if (isFinite(from) && isFinite(to)) {
+				entry.pointHeightsByPointIndex[keys[i]] = { startCm: from, endCm: to };
+			} else if (isFinite(parseFloat(item.valueCm))) {
+				var v = Math.abs(parseFloat(item.valueCm));
+				entry.pointHeightsByPointIndex[keys[i]] = { startCm: 0, endCm: v };
+			}
+		}
+	}
+}
+
+function getPointHeightData(entry, pointIndex) {
+	ensureEntryDefaults(entry);
+	migrateLegacyPointHeights(entry);
+	var raw = entry.pointHeightsByPointIndex[String(pointIndex)];
+	if (!raw || typeof raw !== "object") return null;
+	return raw;
+}
+
+function parseHeightCm(val) {
+	var n = parseFloat(val);
+	return isFinite(n) ? n : null;
+}
+
+/** Height where the cable arrives at this point (along the path). */
+function getPointHeightStartCm(entry, pointIndex) {
+	var d = getPointHeightData(entry, pointIndex);
+	if (!d) return null;
+	if (d.startCm != null) return parseHeightCm(d.startCm);
+	return null;
+}
+
+/** Height where the cable leaves this point (along the path). */
+function getPointHeightEndCm(entry, pointIndex) {
+	var d = getPointHeightData(entry, pointIndex);
+	if (!d) return null;
+	if (d.endCm != null) return parseHeightCm(d.endCm);
+	return null;
+}
+
+/** Height badge: only when start and end are equal (level at point). */
+function formatPointHeightBadgeText(pointData) {
+	if (!pointData || typeof pointData !== "object") return "";
+	var s = pointData.startCm != null ? parseHeightCm(pointData.startCm) : null;
+	var e = pointData.endCm != null ? parseHeightCm(pointData.endCm) : null;
+	if (s == null || e == null) return "";
+	if (Math.abs(s - e) >= 0.0001) return "";
+	return formatLength(Math.abs(s));
+}
+
+function formatPointDiffBadgeText(pointData) {
+	if (!pointData || typeof pointData !== "object") return "";
+	var s = pointData.startCm != null ? parseHeightCm(pointData.startCm) : null;
+	var e = pointData.endCm != null ? parseHeightCm(pointData.endCm) : null;
+	if (s == null || e == null) return "";
+	var diff = e - s;
+	if (Math.abs(diff) < 0.0001) return "";
+	var sign = diff > 0 ? "+" : "-";
+	return sign + formatLength(Math.abs(diff));
+}
+
+/** Slope along plan segment: leave height at start vertex → arrive height at end vertex. */
+function formatSlopeSegmentBadgeText(hLeaveCm, hArriveCm) {
+	if (hLeaveCm == null || hArriveCm == null) return "";
+	var diff = hArriveCm - hLeaveCm;
+	if (Math.abs(diff) < 0.0001) return "";
+	var sign = diff > 0 ? "+" : "-";
+	return sign + formatLength(Math.abs(diff));
+}
+
+function vertexToParentSpace(vectorNode, v) {
+	var rt = vectorNode.relativeTransform;
+	var a = rt[0][0];
+	var b = rt[1][0];
+	var c = rt[0][1];
+	var d = rt[1][1];
+	var e = rt[0][2];
+	var f = rt[1][2];
+	return {
+		x: a * v.x + c * v.y + e,
+		y: b * v.x + d * v.y + f,
+	};
+}
+
+function getSegmentMidpointInParentSpace(vectorNode, seg) {
+	var net = vectorNode.vectorNetwork;
+	var s = net.vertices[seg.start];
+	var e = net.vertices[seg.end];
+	var ts = seg.tangentStart;
+	var te = seg.tangentEnd;
+	var curved = (ts && (ts.x !== 0 || ts.y !== 0)) || (te && (te.x !== 0 || te.y !== 0));
+	if (!curved) {
+		var ps = vertexToParentSpace(vectorNode, s);
+		var pe = vertexToParentSpace(vectorNode, e);
+		return { x: (ps.x + pe.x) / 2, y: (ps.y + pe.y) / 2 };
+	}
+	var p0 = { x: s.x, y: s.y };
+	var p1 = { x: s.x + (ts ? ts.x : 0), y: s.y + (ts ? ts.y : 0) };
+	var p2 = { x: e.x + (te ? te.x : 0), y: e.y + (te ? te.y : 0) };
+	var p3 = { x: e.x, y: e.y };
+	var t = 0.5;
+	var u = 1 - t;
+	var lx = u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x;
+	var ly = u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y;
+	return vertexToParentSpace(vectorNode, { x: lx, y: ly });
+}
+
+function isElevationVisualNode(n) {
+	if (!n || !n.getPluginData) return false;
+	if (n.getPluginData("pluginElevationPointInfo") === "1") return true;
+	if (n.getPluginData("pluginElevationPoint") === "1") return true;
+	var t = n.getPluginData("pluginElevationBadgeType");
+	return t === "height" || t === "diff" || t === "slope";
+}
+
+function markElevationAnchor(node, anchorX, anchorY) {
+	node.setPluginData("pluginElevationAnchorX", String(anchorX));
+	node.setPluginData("pluginElevationAnchorY", String(anchorY));
+}
+
+function tagElevationVector(node, vectorId) {
+	if (vectorId) node.setPluginData("pluginElevationVectorId", vectorId);
+}
+
+function placeElevationVisual(node, centerX, centerY, anchorX, anchorY, vectorId, pinToVertex) {
+	node.x = centerX - node.width / 2;
+	node.y = centerY - node.height / 2;
+	markElevationAnchor(node, anchorX, anchorY);
+	tagElevationVector(node, vectorId);
+	if (pinToVertex) {
+		node.setPluginData("pluginElevationVertexX", String(anchorX));
+		node.setPluginData("pluginElevationVertexY", String(anchorY));
+	} else {
+		node.setPluginData("pluginElevationVertexX", "");
+		node.setPluginData("pluginElevationVertexY", "");
+	}
+}
+
+function bringElevationVisualsToFront() {
+	var markers = figma.currentPage.findAll(function (n) {
+		return isElevationVisualNode(n);
+	});
+	for (var i = 0; i < markers.length; i++) {
+		var node = markers[i];
+		var parent = node.parent;
+		if (parent && "appendChild" in parent) {
+			try {
+				parent.appendChild(node);
+			} catch (e) {}
+		}
+	}
+}
+
+function placePointVisualStack(vectorNode, pointIndex, parentNode, pointX, pointY, nodes, gap, idList) {
+	if (!nodes || nodes.length === 0) return;
+	var vectorId = vectorNode.id;
+	var totalH = 0;
+	for (var ni = 0; ni < nodes.length; ni++) totalH += nodes[ni].height + (ni > 0 ? gap : 0);
+	var cy = pointY - totalH / 2;
+	for (var nj = 0; nj < nodes.length; nj++) {
+		var node = nodes[nj];
+		var centerY = cy + node.height / 2;
+		parentNode.appendChild(node);
+		placeElevationVisual(node, pointX, centerY, pointX, pointY, vectorId, true);
+		idList.push(node.id);
+		cy += node.height + gap;
+	}
+}
+
+function sanitizePointHeightsForLine(entry, vectorNode) {
+	ensureEntryDefaults(entry);
+	migrateLegacyPointHeights(entry);
+	var vertexCount =
+		vectorNode && vectorNode.vectorNetwork && vectorNode.vectorNetwork.vertices
+			? vectorNode.vectorNetwork.vertices.length
+			: 0;
+	var clean = {};
+	var raw = entry.pointHeightsByPointIndex || {};
+	var keys = Object.keys(raw);
+	for (var i = 0; i < keys.length; i++) {
+		var idx = parseInt(keys[i], 10);
+		if (!isFinite(idx) || idx < 0 || idx >= vertexCount) continue;
+		var item = raw[keys[i]];
+		if (!item || typeof item !== "object") continue;
+		var start = item.startCm != null ? parseHeightCm(item.startCm) : null;
+		var end = item.endCm != null ? parseHeightCm(item.endCm) : null;
+		if (start == null && end == null) continue;
+		var row = {};
+		if (start != null) row.startCm = start;
+		if (end != null) row.endCm = end;
+		clean[String(idx)] = row;
+	}
+	entry.pointHeightsByPointIndex = clean;
+	entry.elevationsCmByPointIndex = {};
+}
+
+function getPlanLengthCm(vectorNode, entry) {
+	if (!entry || !entry.pxPerCm || entry.pxPerCm <= 0) return 0;
+	var net = vectorNode.vectorNetwork;
+	if (!net || !net.segments || net.segments.length === 0) return 0;
+	var planCm = 0;
+	for (var i = 0; i < net.segments.length; i++) {
+		var seg = net.segments[i];
+		var s = net.vertices[seg.start];
+		var e = net.vertices[seg.end];
+		var ts = seg.tangentStart;
+		var te = seg.tangentEnd;
+		var curved = (ts && (ts.x !== 0 || ts.y !== 0)) || (te && (te.x !== 0 || te.y !== 0));
+		var lenPx = curved
+			? cubicBezierLength(
+					s,
+					{ x: s.x + (ts ? ts.x : 0), y: s.y + (ts ? ts.y : 0) },
+					{ x: e.x + (te ? te.x : 0), y: e.y + (te ? te.y : 0) },
+					e,
+				)
+			: Math.sqrt(Math.pow(e.x - s.x, 2) + Math.pow(e.y - s.y, 2));
+		planCm += lenPx / entry.pxPerCm;
+	}
+	return planCm;
+}
+
+/** 3D length: vertical at point (|end−start|) + slope on plan segments (end→next start). */
+function getDisplayedLengthCm(vectorNode, entry) {
+	if (!entry || !entry.pxPerCm || entry.pxPerCm <= 0) return 0;
+	var net = vectorNode.vectorNetwork;
+	if (!net || !net.segments || net.segments.length === 0) return 0;
+	sanitizePointHeightsForLine(entry, vectorNode);
+
+	var totalCm = 0;
+	for (var si = 0; si < net.segments.length; si++) {
+		var seg = net.segments[si];
+		var s = net.vertices[seg.start];
+		var e = net.vertices[seg.end];
+		var ts = seg.tangentStart;
+		var te = seg.tangentEnd;
+		var curved = (ts && (ts.x !== 0 || ts.y !== 0)) || (te && (te.x !== 0 || te.y !== 0));
+		var lenPx = curved
+			? cubicBezierLength(
+					s,
+					{ x: s.x + (ts ? ts.x : 0), y: s.y + (ts ? ts.y : 0) },
+					{ x: e.x + (te ? te.x : 0), y: e.y + (te ? te.y : 0) },
+					e,
+				)
+			: Math.sqrt(Math.pow(e.x - s.x, 2) + Math.pow(e.y - s.y, 2));
+		var lenCm2d = lenPx / entry.pxPerCm;
+		var hLeave = getPointHeightEndCm(entry, seg.start);
+		var hArrive = getPointHeightStartCm(entry, seg.end);
+		if (hLeave != null && hArrive != null) {
+			var dh = hArrive - hLeave;
+			totalCm += Math.sqrt(lenCm2d * lenCm2d + dh * dh);
+		} else {
+			totalCm += lenCm2d;
+		}
+	}
+
+	for (var vi = 0; vi < net.vertices.length; vi++) {
+		var hs = getPointHeightStartCm(entry, vi);
+		var he = getPointHeightEndCm(entry, vi);
+		if (hs != null && he != null) totalCm += Math.abs(he - hs);
+	}
+	return totalCm;
+}
+
+async function removePointMarkers(entry) {
+	ensureEntryDefaults(entry);
+	var ids = entry.pointMarkerIds || [];
+	for (var i = 0; i < ids.length; i++) {
+		try {
+			var n = await figma.getNodeByIdAsync(ids[i]);
+			if (n) n.remove();
+		} catch (e) {}
+	}
+	entry.pointMarkerIds = [];
+}
+
+async function removeHeightBadges(entry) {
+	ensureEntryDefaults(entry);
+	var ids = entry.heightBadgeIds || [];
+	for (var i = 0; i < ids.length; i++) {
+		try {
+			var n = await figma.getNodeByIdAsync(ids[i]);
+			if (n) n.remove();
+		} catch (e) {}
+	}
+	entry.heightBadgeIds = [];
+}
+
+async function removeSlopeBadges(entry) {
+	ensureEntryDefaults(entry);
+	var ids = entry.slopeBadgeIds || [];
+	for (var i = 0; i < ids.length; i++) {
+		try {
+			var n = await figma.getNodeByIdAsync(ids[i]);
+			if (n) n.remove();
+		} catch (e) {}
+	}
+	entry.slopeBadgeIds = [];
+}
+
+async function createMarkerPill(text, bgHex, fontSize) {
+	return createElevationBadge(text, bgHex, fontSize || 9, "height");
+}
+
+async function createElevationBadge(text, bgHex, fontSize, badgeType) {
+	await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+	var t = figma.createText();
+	t.fontName = { family: "Inter", style: "Bold" };
+	t.characters = text;
+	t.fontSize = fontSize || 8;
+	t.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }];
+
+	var f = figma.createFrame();
+	f.layoutMode = "HORIZONTAL";
+	f.primaryAxisAlignItems = "CENTER";
+	f.counterAxisAlignItems = "CENTER";
+	var fs = fontSize || 8;
+	f.horizontalPadding = fs <= 7 ? 4 : 5;
+	f.verticalPadding = fs <= 7 ? 1 : 2;
+	f.cornerRadius = 999;
+	f.fills = [{ type: "SOLID", color: hexToRgb(bgHex), opacity: 0.92 }];
+	f.strokes = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: 0.12 }];
+	f.strokeWeight = 1;
+	f.layoutSizingHorizontal = "HUG";
+	f.layoutSizingVertical = "HUG";
+	f.appendChild(t);
+	f.setPluginData("pluginElevationBadgeType", badgeType || "height");
+	f.locked = true;
+	return f;
+}
+
+async function removeAllHeightBadgesFromPage() {
+	var markers = figma.currentPage.findAll(function (n) {
+		if (!n.getPluginData) return false;
+		var t = n.getPluginData("pluginElevationBadgeType");
+		return t === "height" || t === "diff" || t === "slope";
+	});
+	for (var i = 0; i < markers.length; i++) {
+		try {
+			markers[i].remove();
+		} catch (e) {}
+	}
+	var keys = Object.keys(measuredLines);
+	for (var k = 0; k < keys.length; k++) {
+		var entry = measuredLines[keys[k]];
+		if (!entry) continue;
+		ensureEntryDefaults(entry);
+		entry.heightBadgeIds = [];
+		entry.slopeBadgeIds = [];
+		saveMeasuredLine(keys[k], entry);
+	}
+}
+
+var POINT_MARKER_SIZE = 24;
+var INFO_POINT_MARKER_SIZE = 18;
+var INFO_POINT_DOT_SIZE = 28;
+var INFO_POINT_DOT_FONT_SIZE = 7;
+
+function bgColorForPointInfoKind(kind, text) {
+	if (kind === "height") return "#8B5CF6";
+	if (kind === "diff") return text.charAt(0) === "-" ? "#DC2626" : "#16A34A";
+	if (kind === "slope") return text.charAt(0) === "-" ? "#0284C7" : "#0EA5E9";
+	return "#8B5CF6";
+}
+
+function getPointInfoLines(entry, pointIndex) {
+	var lines = [];
+	var pointData = getPointHeightData(entry, pointIndex);
+	var heightText = formatPointHeightBadgeText(pointData);
+	if (heightText) lines.push({ text: heightText, kind: "height" });
+	var diffText = formatPointDiffBadgeText(pointData);
+	if (diffText) lines.push({ text: diffText, kind: "diff" });
+	return lines;
+}
+
+async function createCompactPointCircleMarker(text) {
+	await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+	var t = figma.createText();
+	t.fontName = { family: "Inter", style: "Bold" };
+	t.characters = text;
+	t.fontSize = 9;
+	t.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }];
+
+	var circle = figma.createFrame();
+	circle.layoutMode = "HORIZONTAL";
+	circle.primaryAxisAlignItems = "CENTER";
+	circle.counterAxisAlignItems = "CENTER";
+	circle.resize(INFO_POINT_MARKER_SIZE, INFO_POINT_MARKER_SIZE);
+	circle.cornerRadius = 999;
+	circle.fills = [{ type: "SOLID", color: hexToRgb("#1f6feb") }];
+	circle.strokes = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: 0.15 }];
+	circle.strokeWeight = 1;
+	circle.clipsContent = false;
+	circle.appendChild(t);
+	circle.setPluginData("pluginElevationPointInfo", "1");
+	circle.locked = true;
+	return circle;
+}
+
+/** Round dot at a vertex with elevation text inside (at-points mode). */
+async function createPointInfoDot(text, bgHex, kind) {
+	await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+	var t = figma.createText();
+	t.fontName = { family: "Inter", style: "Bold" };
+	t.characters = text;
+	t.fontSize = INFO_POINT_DOT_FONT_SIZE;
+	t.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }];
+	t.textAlignHorizontal = "CENTER";
+
+	var circle = figma.createFrame();
+	circle.layoutMode = "HORIZONTAL";
+	circle.primaryAxisAlignItems = "CENTER";
+	circle.counterAxisAlignItems = "CENTER";
+	circle.resize(INFO_POINT_DOT_SIZE, INFO_POINT_DOT_SIZE);
+	circle.cornerRadius = INFO_POINT_DOT_SIZE;
+	circle.fills = [{ type: "SOLID", color: hexToRgb(bgHex), opacity: 0.92 }];
+	circle.strokes = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: 0.15 }];
+	circle.strokeWeight = 1;
+	circle.clipsContent = true;
+	circle.appendChild(t);
+	circle.setPluginData("pluginElevationPointInfo", "1");
+	if (kind) circle.setPluginData("pluginElevationPointInfoKind", kind);
+	circle.locked = true;
+	return circle;
+}
+
+async function renderPointInfoForLine(vectorNode, entry, showPointNumbers, gen) {
+	ensureEntryDefaults(entry);
+	entry.pointMarkerIds = [];
+	var parentNode = vectorNode.parent || figma.currentPage;
+	var points = getVectorPointsInParentSpace(vectorNode);
+	var gap = 2;
+
+	for (var i = 0; i < points.length; i++) {
+		if (gen != null && gen !== elevationVisualsGeneration) return;
+		var p = points[i];
+		var infoLines = getPointInfoLines(entry, p.index);
+		if (!showPointNumbers && infoLines.length === 0) continue;
+
+		var nodes = [];
+		if (showPointNumbers) {
+			nodes.push(await createCompactPointCircleMarker(String(p.index + 1)));
+		}
+		for (var li = 0; li < infoLines.length; li++) {
+			var row = infoLines[li];
+			nodes.push(await createPointInfoDot(row.text, bgColorForPointInfoKind(row.kind, row.text), row.kind));
+		}
+
+		placePointVisualStack(vectorNode, p.index, parentNode, p.x, p.y, nodes, gap, entry.pointMarkerIds);
+	}
+}
+
+async function createPointCircleMarker(text) {
+	await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+	var t = figma.createText();
+	t.fontName = { family: "Inter", style: "Bold" };
+	t.characters = text;
+	t.fontSize = 11;
+	t.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }];
+
+	var circle = figma.createFrame();
+	circle.layoutMode = "HORIZONTAL";
+	circle.primaryAxisAlignItems = "CENTER";
+	circle.counterAxisAlignItems = "CENTER";
+	circle.resize(POINT_MARKER_SIZE, POINT_MARKER_SIZE);
+	circle.cornerRadius = 999;
+	circle.fills = [{ type: "SOLID", color: hexToRgb("#1f6feb") }];
+	circle.strokes = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: 0.2 }];
+	circle.strokeWeight = 1.5;
+	circle.clipsContent = false;
+	circle.appendChild(t);
+	circle.setPluginData("pluginElevationPoint", "1");
+	circle.locked = true;
+	return circle;
+}
+
+async function renderPointMarkersForLine(vectorNode, entry, gen) {
+	ensureEntryDefaults(entry);
+	entry.pointMarkerIds = [];
+	var parentNode = vectorNode.parent || figma.currentPage;
+	var points = getVectorPointsInParentSpace(vectorNode);
+	for (var i = 0; i < points.length; i++) {
+		if (gen != null && gen !== elevationVisualsGeneration) return;
+		var p = points[i];
+		var idxLabel = await createPointCircleMarker(String(p.index + 1));
+		parentNode.appendChild(idxLabel);
+		placeElevationVisual(idxLabel, p.x, p.y, p.x, p.y, vectorNode.id, true);
+		entry.pointMarkerIds.push(idxLabel.id);
+	}
+}
+
+async function renderHeightBadgesForLine(vectorNode, entry) {
+	ensureEntryDefaults(entry);
+	await removeHeightBadges(entry);
+	var settings = readUiSettings();
+	if (settings.elevationDisplayAtPoints) return;
+	var showHeights = settings.showHeightBadges;
+	var showDiffs = settings.showDiffBadges;
+	if (!showHeights && !showDiffs) return;
+	var parentNode = vectorNode.parent || figma.currentPage;
+	var points = getVectorPointsInParentSpace(vectorNode);
+	for (var i = 0; i < points.length; i++) {
+		var p = points[i];
+		var pointData = getPointHeightData(entry, p.index);
+		var heightText = showHeights ? formatPointHeightBadgeText(pointData) : "";
+		var diffText = showDiffs ? formatPointDiffBadgeText(pointData) : "";
+		var badges = [];
+		if (heightText) badges.push({ text: heightText, color: "#8B5CF6" });
+		if (diffText) {
+			badges.push({ text: diffText, color: diffText.charAt(0) === "-" ? "#DC2626" : "#16A34A" });
+		}
+		if (badges.length === 0) continue;
+		var gap = 3;
+		var badgeNodes = [];
+		for (var bi = 0; bi < badges.length; bi++) {
+			var meta = badges[bi];
+			var badgeType = meta.text.charAt(0) === "+" || meta.text.charAt(0) === "-" ? "diff" : "height";
+			var hLabel = await createElevationBadge(meta.text, meta.color, 8, badgeType);
+			badgeNodes.push(hLabel);
+		}
+		placePointVisualStack(vectorNode, p.index, parentNode, p.x, p.y, badgeNodes, gap, entry.heightBadgeIds);
+	}
+}
+
+async function renderSlopeBadgesForLine(vectorNode, entry) {
+	ensureEntryDefaults(entry);
+	await removeSlopeBadges(entry);
+	if (!readUiSettings().showSlopeBadges) return;
+
+	var net = vectorNode.vectorNetwork;
+	if (!net || !net.segments || net.segments.length === 0) return;
+	var parentNode = vectorNode.parent || figma.currentPage;
+
+	for (var si = 0; si < net.segments.length; si++) {
+		var seg = net.segments[si];
+		var hLeave = getPointHeightEndCm(entry, seg.start);
+		var hArrive = getPointHeightStartCm(entry, seg.end);
+		var slopeText = formatSlopeSegmentBadgeText(hLeave, hArrive);
+		if (!slopeText) continue;
+
+		var mid = getSegmentMidpointInParentSpace(vectorNode, seg);
+		var color = slopeText.charAt(0) === "-" ? "#0284C7" : "#0EA5E9";
+		var badge = await createElevationBadge(slopeText, color, 8, "slope");
+		parentNode.appendChild(badge);
+		placeElevationVisual(badge, mid.x, mid.y, mid.x, mid.y, vectorNode.id, false);
+		entry.slopeBadgeIds.push(badge.id);
+	}
+}
 
 function getTotalPathLength(vectorNode) {
 	var total = 0;

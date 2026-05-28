@@ -438,7 +438,7 @@
 					<div class="header-icon">📏</div>
 					Line Length Measurer
 				</div>
-				<div class="header-sub">Draw lines with the Pen tool, then measure</div>
+				<div class="header-sub">Measure plan lengths on canvas, optionally with per-point heights</div>
 			</div>
 
 			<div class="nav">
@@ -450,10 +450,15 @@
 			<div class="content">
 				<!-- MEASURE TAB -->
 				<div class="panel active" id="tab-measure">
-					<div id="scaleDisplay" class="scale-display unset">No scale set — go to Calibrate first</div>
+					<div id="scaleDisplay" class="scale-display unset">
+						No scale yet — calibrate so pixel lengths convert to real units
+					</div>
 
 					<div class="section">
 						<div class="section-title">Actions</div>
+						<p class="hint" style="margin-bottom: 8px">
+							Select one or more vector paths, then measure. Already-measured lines are updated in place.
+						</p>
 						<button class="btn btn-primary" onclick="measure()">📏 Measure selected line(s)</button>
 						<button class="btn btn-secondary" onclick="recalculateAll()">
 							↺ Recalculate all measured lines
@@ -463,16 +468,109 @@
 						</button>
 					</div>
 
+					<div class="section" id="elevationSection">
+						<div class="section-title">Point elevations (3D)</div>
+						<p class="hint" style="margin-bottom: 8px">
+							Heights are in <strong style="color: #aaa">cm</strong> at each path point (P1, P2, …).
+							<strong style="color: #aaa">Start</strong> = height where the run <em>arrives</em> at that
+							point; <strong style="color: #aaa">End</strong> = height where it <em>leaves</em>. If start
+							and end match, the point is level (purple dot). If they differ, there is a vertical change
+							at that point (green/red). Along each segment, the run length combines plan distance with
+							the height change from the previous point’s <strong style="color: #aaa">End</strong> to the
+							next point’s <strong style="color: #aaa">Start</strong> (3D length). Click
+							<strong style="color: #aaa">Apply elevations</strong> after editing.
+						</p>
+						<div class="field" style="margin-bottom: 8px">
+							<label style="display: flex; align-items: center; gap: 8px; margin: 0">
+								<input
+									type="checkbox"
+									id="elevationDisplayAtPoints"
+									checked
+									onchange="
+										updateElevationDisplayMode();
+										saveSettings();
+									"
+									style="width: 14px; height: 14px"
+								/>
+								Show info at points (colored dots)
+							</label>
+							<label style="display: flex; align-items: center; gap: 8px; margin: 6px 0 0 0">
+								<input
+									type="checkbox"
+									id="showPointMarkers"
+									checked
+									onchange="togglePointMarkers()"
+									style="width: 14px; height: 14px"
+								/>
+								Show P1, P2, … on the selected line only
+							</label>
+							<label style="display: flex; align-items: center; gap: 8px; margin: 6px 0 0 0">
+								<input
+									type="checkbox"
+									id="showSlopeBadges"
+									checked
+									onchange="saveSettings()"
+									style="width: 14px; height: 14px"
+								/>
+								Show segment slopes on the line (blue)
+							</label>
+						</div>
+						<p class="hint" id="elevationDisplayHint" style="margin: 0 0 8px 0">
+							Dots mode: height and difference at each point. Turn off to use pill badges at points
+							instead.
+						</p>
+						<div class="field" id="badgeDisplayOptions" style="margin-bottom: 8px; display: none">
+							<label style="display: flex; align-items: center; gap: 8px; margin: 0">
+								<input
+									type="checkbox"
+									id="showHeightBadges"
+									onchange="saveSettings()"
+									style="width: 14px; height: 14px"
+								/>
+								Show level heights at points (purple pills)
+							</label>
+							<label style="display: flex; align-items: center; gap: 8px; margin: 6px 0 0 0">
+								<input
+									type="checkbox"
+									id="showDiffBadges"
+									checked
+									onchange="saveSettings()"
+									style="width: 14px; height: 14px"
+								/>
+								Show vertical changes at points (green / red pills)
+							</label>
+							<p class="hint" style="margin: 6px 0 0 0">
+								Badge mode: pills sit on vertices. Segment slopes still appear on the line when enabled
+								above.
+							</p>
+						</div>
+						<button class="btn btn-primary" style="margin-bottom: 8px" onclick="applyElevationData()">
+							Apply elevations
+						</button>
+						<p class="hint" style="margin-bottom: 6px">
+							Per point: <strong style="color: #aaa">arrives</strong> (start) →
+							<strong style="color: #aaa">leaves</strong> (end). Leave blank to clear a point.
+						</p>
+						<div id="elevationList" style="display: flex; flex-direction: column; gap: 7px"></div>
+					</div>
+
 					<div class="section">
 						<div class="section-title">How it works</div>
 						<p class="hint">
-							1. Calibrate your scale in the Calibrate tab.<br /><br />
-							2. Draw routes with the <strong style="color: #aaa">Pen tool</strong> (multi-point
-							lines).<br /><br />
-							3. Select lines and click Measure. Labels appear as pills at the midpoint.<br /><br />
-							4. <strong style="color: #aaa">Drag labels freely</strong> — position is kept unless the
-							line shape changes.<br /><br />
-							5. Moving a line to a different frame auto-recalculates with that frame's scale.
+							<strong style="color: #aaa">Plan length</strong><br />
+							1. Set scale in <strong style="color: #aaa">Calibrate</strong> (or per frame).<br />
+							2. Draw paths with the <strong style="color: #aaa">Pen tool</strong> (one vector per
+							run).<br />
+							3. Select line(s) and click <strong style="color: #aaa">Measure</strong>. A length label
+							appears at the path midpoint and updates when the line moves or reshapes.<br />
+							4. Drag a label to reposition it; the position is kept until the path geometry changes.<br />
+							5. Lines inside a calibrated frame use that frame’s scale automatically.<br /><br />
+							<strong style="color: #aaa">3D length (optional)</strong><br />
+							6. Select a measured line and enter start/end heights per point above, then
+							<strong style="color: #aaa">Apply elevations</strong>. The main label shows total 3D run
+							length (plan + height changes).<br />
+							7. Canvas markers: purple = level at a point, green/red = up/down at a point, blue = slope
+							at the segment midpoint. Point markers are centered on each path vertex.
 						</p>
 					</div>
 
@@ -484,8 +582,11 @@
 					<div class="section">
 						<div class="section-title">Calibrate scale</div>
 						<p class="hint" style="margin-bottom: 10px">
-							Select a vector line drawn over a known distance, enter the real length, choose where to
-							save, then click Calculate.
+							Tell the plugin how many pixels equal a real distance. Select a straight vector drawn over
+							something you know (e.g. a 50&nbsp;m wall), enter that length in cm, choose
+							<strong style="color: #aaa">Global</strong> or a specific frame, then click
+							<strong style="color: #aaa">Calculate &amp; save</strong>. All measured lines in scope will
+							use this scale until you change it.
 						</p>
 
 						<div class="field">
@@ -494,7 +595,7 @@
 								<input
 									type="number"
 									id="knownCm"
-									placeholder="e.g. 5000"
+									placeholder="e.g. 5000 (= 50 m)"
 									min="0.1"
 									step="0.1"
 									value="100"
@@ -540,7 +641,9 @@
 							</div>
 							<div class="mode-tab" id="modeTab-manual" onclick="setColorMode('manual')">✏️ Manual</div>
 						</div>
-						<p class="hint" id="modeHint">Each new line gets a unique color. Best for dark backgrounds.</p>
+						<p class="hint" id="modeHint">
+							Each measured line gets the next color from the palette. Suited to dark canvases.
+						</p>
 						<div id="palettePreview">
 							<div
 								style="font-size: 10px; color: var(--text-muted); margin-top: 10px; margin-bottom: 5px"
@@ -643,7 +746,9 @@
 
 					<div class="section">
 						<div class="section-title">Label position</div>
-						<p class="hint" style="margin-bottom: 8px">Where to place the label relative to the line.</p>
+						<p class="hint" style="margin-bottom: 8px">
+							Default position of the length label along the path (you can still drag it afterward).
+						</p>
 						<div style="display: flex; gap: 5px">
 							<div class="place-tab active" id="placeTab-above" onclick="setPlacement('above')">
 								Above
@@ -652,15 +757,15 @@
 							<div class="place-tab" id="placeTab-below" onclick="setPlacement('below')">Below</div>
 						</div>
 						<p class="hint" id="placeHint" style="margin-top: 6px">
-							Label is offset above the line, clear of the stroke width.
+							Label sits on the outside of the line, offset from the stroke.
 						</p>
 					</div>
 
 					<div class="section">
 						<div class="section-title">Units</div>
 						<p class="hint">
-							Labels auto-scale: &lt;100 cm → cm, 100–99999 cm → m, ≥100000 cm → km. Always 2 decimal
-							places.
+							Displayed lengths pick a readable unit: under 1&nbsp;m → cm, 1&nbsp;m–999.99&nbsp;m → m,
+							1&nbsp;km and above → km. Values show two decimal places. Internal math always uses cm.
 						</p>
 					</div>
 				</div>
@@ -677,6 +782,7 @@
 			var colorMode = "auto-dark";
 			var activePxPerCm = 0; // the currently active scale (from calibrations)
 			var labelPlacement = "above";
+			var elevationLines = [];
 
 			var PALETTES = {
 				"auto-dark": [
@@ -719,6 +825,7 @@
 				}
 				if (name === "measure") {
 					parent.postMessage({ pluginMessage: { type: "get-selection-scale" } }, "*");
+					parent.postMessage({ pluginMessage: { type: "get-elevation-data" } }, "*");
 				}
 			}
 
@@ -731,7 +838,7 @@
 					el.textContent = "Scale: " + activePxPerCm.toFixed(4) + " px/cm (" + src + ")";
 					el.classList.remove("unset");
 				} else {
-					el.textContent = "No scale set — go to Calibrate first";
+					el.textContent = "No scale yet — calibrate so pixel lengths convert to real units";
 					el.classList.add("unset");
 				}
 			}
@@ -825,7 +932,23 @@
 					fontSize: parseInt(document.getElementById("fontSize").value) || 14,
 					labelPlacement: labelPlacement,
 					lineWidth: parseFloat(document.getElementById("lineWidth").value) || 8,
+					showPointMarkers: !!document.getElementById("showPointMarkers").checked,
+					elevationDisplayAtPoints: !!document.getElementById("elevationDisplayAtPoints").checked,
+					showHeightBadges: !!document.getElementById("showHeightBadges").checked,
+					showDiffBadges: !!document.getElementById("showDiffBadges").checked,
+					showSlopeBadges: !!document.getElementById("showSlopeBadges").checked,
 				};
+			}
+
+			function updateElevationDisplayMode() {
+				var atPoints = !!document.getElementById("elevationDisplayAtPoints").checked;
+				document.getElementById("badgeDisplayOptions").style.display = atPoints ? "none" : "block";
+				var hint = document.getElementById("elevationDisplayHint");
+				if (hint) {
+					hint.textContent = atPoints
+						? "Dots mode: round markers at each point show level (purple) and vertical change (green/red). Slopes stay on the line."
+						: "Badge mode: pill markers at points. Use the options below to choose which values to show.";
+				}
 			}
 
 			function saveSettings() {
@@ -855,6 +978,22 @@
 					);
 				}
 				if (s.labelPlacement) setPlacement(s.labelPlacement);
+				if (typeof s.showPointMarkers !== "undefined") {
+					document.getElementById("showPointMarkers").checked = !!s.showPointMarkers;
+				}
+				if (typeof s.elevationDisplayAtPoints !== "undefined") {
+					document.getElementById("elevationDisplayAtPoints").checked = !!s.elevationDisplayAtPoints;
+				}
+				updateElevationDisplayMode();
+				if (typeof s.showHeightBadges !== "undefined") {
+					document.getElementById("showHeightBadges").checked = !!s.showHeightBadges;
+				}
+				if (typeof s.showDiffBadges !== "undefined") {
+					document.getElementById("showDiffBadges").checked = !!s.showDiffBadges;
+				}
+				if (typeof s.showSlopeBadges !== "undefined") {
+					document.getElementById("showSlopeBadges").checked = !!s.showSlopeBadges;
+				}
 				updatePreview();
 			}
 
@@ -874,6 +1013,7 @@
 							lineColor: s.lineColor,
 							fontSize: s.fontSize,
 							labelPlacement: s.labelPlacement,
+							lineWidth: s.lineWidth,
 						},
 					},
 					"*",
@@ -897,6 +1037,7 @@
 							lineColor: s.lineColor,
 							fontSize: s.fontSize,
 							labelPlacement: s.labelPlacement,
+							lineWidth: s.lineWidth,
 						},
 					},
 					"*",
@@ -907,6 +1048,103 @@
 				parent.postMessage({ pluginMessage: { type: "reset-label-position" } }, "*");
 			}
 
+			var ELEVATION_UI_POINT_LIMIT = 60;
+
+			function renderElevationList(lines) {
+				elevationLines = lines || [];
+				var root = document.getElementById("elevationList");
+				root.innerHTML = "";
+				if (elevationLines.length === 0) {
+					var empty = document.createElement("div");
+					empty.className = "hint";
+					empty.textContent =
+						"Select a measured line, its length label, or its line group to edit heights for each point.";
+					root.appendChild(empty);
+					return;
+				}
+				elevationLines.forEach(function (line) {
+					var card = document.createElement("div");
+					card.style.background = "var(--surface2)";
+					card.style.border = "1px solid var(--border)";
+					card.style.borderRadius = "var(--radius)";
+					card.style.padding = "7px";
+					var safeName = esc(line.name || "Line");
+					var ptCount = line.pointCount || 0;
+					var header =
+						'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">' +
+						'<div style="font-size:11px;font-weight:600;color:var(--text)">' +
+						safeName +
+						"</div>" +
+						'<div style="font-size:10px;color:var(--text-muted)">' +
+						ptCount +
+						" pts</div></div>";
+					var rows = "";
+					if (ptCount > ELEVATION_UI_POINT_LIMIT) {
+						rows =
+							'<p class="hint">This path has ' +
+							ptCount +
+							" points (max " +
+							ELEVATION_UI_POINT_LIMIT +
+							" in the panel). Split the run or edit heights on a simpler selection.</p>";
+					} else {
+						rows = '<div style="display:flex;flex-direction:column;gap:4px">';
+						for (var i = 0; i < ptCount; i++) {
+							var ph = line.pointHeightsByPointIndex && line.pointHeightsByPointIndex[String(i)];
+							var startVal = ph && ph.startCm != null && isFinite(ph.startCm) ? String(ph.startCm) : "";
+							var endVal = ph && ph.endCm != null && isFinite(ph.endCm) ? String(ph.endCm) : "";
+							rows +=
+								'<div class="elevation-row" data-line-id="' +
+								esc(line.vectorId) +
+								'" data-point-index="' +
+								i +
+								'" style="display:flex;align-items:center;gap:5px">' +
+								'<div style="width:28px;font-size:10px;color:var(--text-dim)">P' +
+								(i + 1) +
+								"</div>" +
+								'<input type="number" step="0.1" class="height-start" placeholder="arrives" value="' +
+								esc(startVal) +
+								'" style="width:0;flex:1;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px 6px;font-size:11px"/>' +
+								'<div style="font-size:10px;color:var(--text-muted)">→</div>' +
+								'<input type="number" step="0.1" class="height-end" placeholder="leaves" value="' +
+								esc(endVal) +
+								'" style="width:0;flex:1;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px 6px;font-size:11px"/>' +
+								'<div style="font-size:10px;color:var(--text-muted);width:18px">cm</div></div>';
+						}
+						rows += "</div>";
+					}
+					card.innerHTML = header + rows;
+					root.appendChild(card);
+				});
+			}
+
+			function applyElevationData() {
+				var updates = {};
+				document.querySelectorAll("#elevationList .elevation-row").forEach(function (row) {
+					var lineId = row.getAttribute("data-line-id");
+					var idx = row.getAttribute("data-point-index");
+					if (!updates[lineId]) updates[lineId] = {};
+					var start = parseFloat(row.querySelector(".height-start").value);
+					var end = parseFloat(row.querySelector(".height-end").value);
+					var hasStart = isFinite(start);
+					var hasEnd = isFinite(end);
+					if (!hasStart && !hasEnd) {
+						updates[lineId][idx] = null;
+						return;
+					}
+					var item = {};
+					if (hasStart) item.startCm = start;
+					if (hasEnd) item.endCm = end;
+					updates[lineId][idx] = item;
+				});
+				parent.postMessage({ pluginMessage: { type: "set-point-elevations", updates: updates } }, "*");
+			}
+
+			function togglePointMarkers() {
+				var checked = !!document.getElementById("showPointMarkers").checked;
+				parent.postMessage({ pluginMessage: { type: "toggle-point-markers", show: checked } }, "*");
+				saveSettings();
+			}
+
 			// ── Color mode ────────────────────────────────────────────────────────────────
 			function setPlacement(p) {
 				labelPlacement = p;
@@ -915,9 +1153,9 @@
 				});
 				document.getElementById("placeTab-" + p).classList.add("active");
 				var hints = {
-					above: "Label is offset above the line, clear of the stroke width.",
-					center: "Label sits centered on the line (pill covers the stroke).",
-					below: "Label is offset below the line, clear of the stroke width.",
+					above: "Default: label on the top side of the line (in screen coordinates), clear of the stroke.",
+					center: "Default: label centered on the path; it may cover part of the line.",
+					below: "Default: label on the bottom side of the line, clear of the stroke.",
 				};
 				document.getElementById("placeHint").textContent = hints[p];
 				saveSettings();
@@ -930,9 +1168,11 @@
 				});
 				document.getElementById("modeTab-" + mode).classList.add("active");
 				var hints = {
-					"auto-dark": "Each new line gets a unique color. Best for dark backgrounds.",
-					"auto-light": "Each new line gets a unique darker color. Best for light backgrounds.",
-					manual: "All lines and labels use the colors you specify below.",
+					"auto-dark":
+						"Bright palette: each new measured line gets the next color. Best on dark backgrounds.",
+					"auto-light":
+						"Darker palette: each new measured line gets the next color. Best on light backgrounds.",
+					manual: "Every measured line and label uses the line and label colors you set below.",
 				};
 				document.getElementById("modeHint").textContent = hints[mode];
 				var isManual = mode === "manual";
@@ -1062,6 +1302,26 @@
 				if (msg.type === "scale-info") {
 					updateScaleDisplay(msg.pxPerCm, msg.source || "global");
 				}
+
+				if (msg.type === "elevation-data") {
+					if (typeof msg.showPointMarkers !== "undefined") {
+						document.getElementById("showPointMarkers").checked = !!msg.showPointMarkers;
+					}
+					if (typeof msg.elevationDisplayAtPoints !== "undefined") {
+						document.getElementById("elevationDisplayAtPoints").checked = !!msg.elevationDisplayAtPoints;
+					}
+					updateElevationDisplayMode();
+					if (typeof msg.showHeightBadges !== "undefined") {
+						document.getElementById("showHeightBadges").checked = !!msg.showHeightBadges;
+					}
+					if (typeof msg.showDiffBadges !== "undefined") {
+						document.getElementById("showDiffBadges").checked = !!msg.showDiffBadges;
+					}
+					if (typeof msg.showSlopeBadges !== "undefined") {
+						document.getElementById("showSlopeBadges").checked = !!msg.showSlopeBadges;
+					}
+					renderElevationList(msg.lines || []);
+				}
 			};
 
 			// ── Init ──────────────────────────────────────────────────────────────────────
@@ -1069,6 +1329,8 @@
 			updatePreview();
 			parent.postMessage({ pluginMessage: { type: "ui-ready" } }, "*");
 			parent.postMessage({ pluginMessage: { type: "get-selection-scale" } }, "*");
+			updateElevationDisplayMode();
+			parent.postMessage({ pluginMessage: { type: "get-elevation-data" } }, "*");
 		</script>
 	</body>
 </html>
