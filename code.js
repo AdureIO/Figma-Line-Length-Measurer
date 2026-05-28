@@ -43,6 +43,10 @@ var suppressedChangeIds = {};
 var pendingRestoreData = null;
 var elevationVisualsGeneration = 0;
 var elevationVisualsSyncChain = Promise.resolve();
+var elevationSyncInProgress = false;
+var elevationSyncDebounceTimer = null;
+var elevationFontLoaded = false;
+var ELEVATION_SYNC_DEBOUNCE_MS = 250;
 var DEFAULT_UI_SETTINGS = {
 	colorMode: "auto-dark",
 	lineColor: "#ff5500",
@@ -817,7 +821,7 @@ async function init() {
 	// Lines may carry frame pxPerCm while frame nodeScale was lost on paste — infer again after global restore.
 	await inferFrameScalesFromMeasuredLines();
 	await restoreDiscoveredLineAppearance();
-	await scheduleSyncElevationVisuals();
+	await scheduleSyncElevationVisuals(true);
 
 	// 3. Send restored state + calibrations list to UI
 	var calibrations = await getNodeScalesList();
@@ -1062,124 +1066,140 @@ function collectPointMarkerVectorIdsFromSelection(selection) {
 	return Object.keys(out);
 }
 
-function scheduleSyncElevationVisuals() {
-	elevationVisualsSyncChain = elevationVisualsSyncChain
-		.catch(function () {
-			return undefined;
-		})
-		.then(function () {
-			return syncElevationVisuals();
-		});
+function scheduleSyncElevationVisuals(immediate) {
+	function enqueue() {
+		elevationVisualsSyncChain = elevationVisualsSyncChain
+			.catch(function () {
+				return undefined;
+			})
+			.then(function () {
+				return syncElevationVisuals();
+			});
+		return elevationVisualsSyncChain;
+	}
+
+	if (immediate) {
+		if (elevationSyncDebounceTimer) {
+			clearTimeout(elevationSyncDebounceTimer);
+			elevationSyncDebounceTimer = null;
+		}
+		return enqueue();
+	}
+
+	if (elevationSyncDebounceTimer) clearTimeout(elevationSyncDebounceTimer);
+	elevationSyncDebounceTimer = setTimeout(function () {
+		elevationSyncDebounceTimer = null;
+		enqueue();
+	}, ELEVATION_SYNC_DEBOUNCE_MS);
 	return elevationVisualsSyncChain;
 }
 
-async function removeAllPointMarkersFromPage() {
-	var markers = figma.currentPage.findAll(function (n) {
-		if (!n.getPluginData) return false;
-		if (n.getPluginData("pluginElevationPoint") === "1") return true;
-		if (n.getPluginData("pluginElevationPointInfo") === "1") return true;
-		// Legacy point circles (before pluginElevationPoint tag)
-		return (
-			n.type === "FRAME" &&
-			n.getPluginData("pluginElevationMarker") === "1" &&
-			Math.abs(n.width - 24) < 0.01 &&
-			Math.abs(n.height - 24) < 0.01
-		);
-	});
-	for (var i = 0; i < markers.length; i++) {
+async function ensureElevationFontsLoaded() {
+	if (elevationFontLoaded) return;
+	await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+	elevationFontLoaded = true;
+}
+
+function lineHasElevationData(entry) {
+	ensureEntryDefaults(entry);
+	var raw = entry.pointHeightsByPointIndex || {};
+	var keys = Object.keys(raw);
+	for (var i = 0; i < keys.length; i++) {
+		if (raw[keys[i]] && typeof raw[keys[i]] === "object") return true;
+	}
+	return false;
+}
+
+async function removeElevationVisualsForEntry(entry) {
+	if (!entry) return;
+	ensureEntryDefaults(entry);
+	var ids = (entry.pointMarkerIds || []).concat(entry.heightBadgeIds || []).concat(entry.slopeBadgeIds || []);
+	for (var i = 0; i < ids.length; i++) {
 		try {
-			markers[i].remove();
+			var n = await figma.getNodeByIdAsync(ids[i]);
+			if (n) n.remove();
 		} catch (e) {}
 	}
-	var keys = Object.keys(measuredLines);
-	for (var k = 0; k < keys.length; k++) {
-		var entry = measuredLines[keys[k]];
-		if (!entry) continue;
-		ensureEntryDefaults(entry);
-		entry.pointMarkerIds = [];
-		saveMeasuredLine(keys[k], entry);
-	}
+	entry.pointMarkerIds = [];
+	entry.heightBadgeIds = [];
+	entry.slopeBadgeIds = [];
 }
 
 async function syncElevationVisuals() {
 	var gen = ++elevationVisualsGeneration;
-	var keys = Object.keys(measuredLines);
+	elevationSyncInProgress = true;
+	var touchedLineIds = [];
 
-	await removeAllPointMarkersFromPage();
-	await removeAllHeightBadgesFromPage();
-	if (gen !== elevationVisualsGeneration) return;
+	try {
+		await ensureElevationFontsLoaded();
+		if (gen !== elevationVisualsGeneration) return;
 
-	var settings = readUiSettings();
-	var atPoints = settings.elevationDisplayAtPoints;
-	var selectedIds = collectPointMarkerVectorIdsFromSelection(figma.currentPage.selection);
-	var selectedSet = {};
-	for (var si = 0; si < selectedIds.length; si++) selectedSet[selectedIds[si]] = true;
+		var keys = Object.keys(measuredLines);
+		var settings = readUiSettings();
+		var atPoints = settings.elevationDisplayAtPoints;
+		var selectedIds = collectPointMarkerVectorIdsFromSelection(figma.currentPage.selection);
+		var selectedSet = {};
+		for (var si = 0; si < selectedIds.length; si++) selectedSet[selectedIds[si]] = true;
 
-	if (atPoints) {
-		for (var ai = 0; ai < keys.length; ai++) {
+		for (var ki = 0; ki < keys.length; ki++) {
 			if (gen !== elevationVisualsGeneration) return;
-			var aId = keys[ai];
-			var aEntry = measuredLines[aId];
-			if (!aEntry) continue;
-			try {
-				var aVector = await figma.getNodeByIdAsync(aId);
-				if (!aVector || aVector.type !== "VECTOR") continue;
-				var showP = settings.showPointMarkers !== false && !!selectedSet[aId];
-				await renderPointInfoForLine(aVector, aEntry, showP, gen);
-				if (gen !== elevationVisualsGeneration) return;
-				saveMeasuredLine(aId, aEntry);
-			} catch (e) {}
-		}
-	} else {
-		if (settings.showPointMarkers !== false) {
-			for (var pi = 0; pi < selectedIds.length; pi++) {
-				if (gen !== elevationVisualsGeneration) return;
-				var pointVectorId = selectedIds[pi];
-				var pointEntry = measuredLines[pointVectorId];
-				if (!pointEntry) continue;
-				try {
-					var pointVector = await figma.getNodeByIdAsync(pointVectorId);
-					if (!pointVector || pointVector.type !== "VECTOR") continue;
-					await renderPointMarkersForLine(pointVector, pointEntry, gen);
-					if (gen !== elevationVisualsGeneration) return;
-					saveMeasuredLine(pointVectorId, pointEntry);
-				} catch (e) {}
-			}
-		}
-
-		for (var bi = 0; bi < keys.length; bi++) {
-			if (gen !== elevationVisualsGeneration) return;
-			var vectorId = keys[bi];
+			var vectorId = keys[ki];
 			var entry = measuredLines[vectorId];
 			if (!entry) continue;
-			ensureEntryDefaults(entry);
+
+			var isSelected = !!selectedSet[vectorId];
+			var hasElev = lineHasElevationData(entry);
+			var shouldRender = isSelected || hasElev;
+
+			if (
+				!shouldRender &&
+				!(entry.pointMarkerIds && entry.pointMarkerIds.length) &&
+				!(entry.heightBadgeIds && entry.heightBadgeIds.length) &&
+				!(entry.slopeBadgeIds && entry.slopeBadgeIds.length)
+			) {
+				continue;
+			}
+
+			await removeElevationVisualsForEntry(entry);
+			if (!shouldRender) {
+				touchedLineIds.push(vectorId);
+				continue;
+			}
+
+			if (gen !== elevationVisualsGeneration) return;
 			try {
 				var v = await figma.getNodeByIdAsync(vectorId);
 				if (!v || v.type !== "VECTOR") continue;
-				await renderHeightBadgesForLine(v, entry);
-				saveMeasuredLine(vectorId, entry);
+
+				if (atPoints) {
+					var showP = settings.showPointMarkers !== false && isSelected;
+					await renderPointInfoForLine(v, entry, showP, gen);
+				} else {
+					if (settings.showPointMarkers !== false && isSelected) {
+						await renderPointMarkersForLine(v, entry, gen);
+					}
+					if (hasElev && (settings.showHeightBadges || settings.showDiffBadges)) {
+						await renderHeightBadgesForLine(v, entry);
+					}
+				}
+				if (settings.showSlopeBadges && hasElev) {
+					await renderSlopeBadgesForLine(v, entry);
+				}
+				touchedLineIds.push(vectorId);
 			} catch (e) {}
 		}
-	}
 
-	if (settings.showSlopeBadges) {
-		for (var slopeIdx = 0; slopeIdx < keys.length; slopeIdx++) {
-			if (gen !== elevationVisualsGeneration) return;
-			var slopeVectorId = keys[slopeIdx];
-			var slopeEntry = measuredLines[slopeVectorId];
-			if (!slopeEntry) continue;
-			ensureEntryDefaults(slopeEntry);
-			try {
-				var slopeVector = await figma.getNodeByIdAsync(slopeVectorId);
-				if (!slopeVector || slopeVector.type !== "VECTOR") continue;
-				await renderSlopeBadgesForLine(slopeVector, slopeEntry);
-				saveMeasuredLine(slopeVectorId, slopeEntry);
-			} catch (e) {}
+		if (gen === elevationVisualsGeneration && touchedLineIds.length > 0) {
+			bringElevationVisualsToFront();
 		}
-	}
-
-	if (gen === elevationVisualsGeneration) {
-		bringElevationVisualsToFront();
+	} finally {
+		elevationSyncInProgress = false;
+		if (gen === elevationVisualsGeneration) {
+			for (var ti = 0; ti < touchedLineIds.length; ti++) {
+				var tid = touchedLineIds[ti];
+				if (measuredLines[tid]) saveMeasuredLine(tid, measuredLines[tid]);
+			}
+		}
 	}
 }
 
@@ -1227,6 +1247,8 @@ function collectMeasuredVectorIdsFromSelection(selection) {
 // ── Document change handler ───────────────────────────────────────────────────
 
 async function handleDocumentChange(event) {
+	if (elevationSyncInProgress) return;
+
 	var markersNeedRefresh = false;
 	for (var i = 0; i < event.documentChanges.length; i++) {
 		var change = event.documentChanges[i];
@@ -1277,7 +1299,7 @@ async function handleDocumentChange(event) {
 		}
 	}
 	if (markersNeedRefresh) {
-		await scheduleSyncElevationVisuals();
+		scheduleSyncElevationVisuals();
 		await postSelectionElevationInfo();
 	}
 }
@@ -1340,7 +1362,7 @@ figma.ui.onmessage = async function (msg) {
 				typeof msg.settings.showDiffBadges !== "undefined" ||
 				typeof msg.settings.showSlopeBadges !== "undefined")
 		) {
-			await scheduleSyncElevationVisuals();
+			await scheduleSyncElevationVisuals(true);
 		}
 	}
 
@@ -1382,7 +1404,7 @@ figma.ui.onmessage = async function (msg) {
 				saveMeasuredLine(lineId, entry);
 			} catch (e) {}
 		}
-		await scheduleSyncElevationVisuals();
+		await scheduleSyncElevationVisuals(true);
 		await postSelectionElevationInfo();
 		figma.ui.postMessage({ type: "result", text: "✓ Elevations updated" });
 	}
@@ -1391,7 +1413,7 @@ figma.ui.onmessage = async function (msg) {
 		var s = readUiSettings();
 		s.showPointMarkers = msg.show !== false;
 		saveUiSettings(s);
-		await scheduleSyncElevationVisuals();
+		await scheduleSyncElevationVisuals(true);
 		figma.ui.postMessage({
 			type: "elevation-data",
 			lines: await getElevationDataForSelection(),
@@ -1525,7 +1547,7 @@ figma.ui.onmessage = async function (msg) {
 			);
 		}
 		await relaxMovableLabelOverlaps(movedLabelIds, 3);
-		await scheduleSyncElevationVisuals();
+		await scheduleSyncElevationVisuals(true);
 		await postSelectionElevationInfo();
 
 		figma.ui.postMessage({ type: "result", text: "✓ Measured: " + results.join(" · ") });
@@ -1782,7 +1804,7 @@ figma.ui.onmessage = async function (msg) {
 		}
 		await relaxMovableLabelOverlaps(movedLabelIds, 4);
 		figma.ui.postMessage({ type: "result", text: "✓ Updated " + count + " line(s)" });
-		await scheduleSyncElevationVisuals();
+		await scheduleSyncElevationVisuals(true);
 	}
 
 	// ── Reset label position ──────────────────────────────────
@@ -1822,7 +1844,7 @@ figma.ui.onmessage = async function (msg) {
 			}
 		}
 		await relaxMovableLabelOverlaps(movedLabelIds, 4);
-		await scheduleSyncElevationVisuals();
+		await scheduleSyncElevationVisuals(true);
 		await postSelectionElevationInfo();
 		figma.ui.postMessage({ type: "result", text: "✓ Label position reset" });
 	}
@@ -2707,28 +2729,6 @@ async function createElevationBadge(text, bgHex, fontSize, badgeType) {
 	f.setPluginData("pluginElevationBadgeType", badgeType || "height");
 	f.locked = true;
 	return f;
-}
-
-async function removeAllHeightBadgesFromPage() {
-	var markers = figma.currentPage.findAll(function (n) {
-		if (!n.getPluginData) return false;
-		var t = n.getPluginData("pluginElevationBadgeType");
-		return t === "height" || t === "diff" || t === "slope";
-	});
-	for (var i = 0; i < markers.length; i++) {
-		try {
-			markers[i].remove();
-		} catch (e) {}
-	}
-	var keys = Object.keys(measuredLines);
-	for (var k = 0; k < keys.length; k++) {
-		var entry = measuredLines[keys[k]];
-		if (!entry) continue;
-		ensureEntryDefaults(entry);
-		entry.heightBadgeIds = [];
-		entry.slopeBadgeIds = [];
-		saveMeasuredLine(keys[k], entry);
-	}
 }
 
 var POINT_MARKER_SIZE = 24;
