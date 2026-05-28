@@ -39,8 +39,94 @@ var PALETTES = {
 
 var lineColorIndex = 0;
 var measuredLines = {}; // runtime cache: nodeId -> entry
-var suppressChangeFor = null;
+var suppressedChangeIds = {};
 var pendingRestoreData = null;
+var DEFAULT_UI_SETTINGS = {
+	colorMode: "auto-dark",
+	lineColor: "#ff5500",
+	labelColor: "#ff5500",
+	fontSize: 14,
+	labelPlacement: "above",
+	lineWidth: 8,
+};
+
+function readUiSettings() {
+	var raw = figma.root.getPluginData("uiSettings");
+	if (!raw) return DEFAULT_UI_SETTINGS;
+	try {
+		var parsed = JSON.parse(raw);
+		return {
+			colorMode:
+				parsed.colorMode === "auto-dark" || parsed.colorMode === "auto-light" || parsed.colorMode === "manual"
+					? parsed.colorMode
+					: DEFAULT_UI_SETTINGS.colorMode,
+			lineColor:
+				typeof parsed.lineColor === "string" && /^#[0-9a-fA-F]{6}$/.test(parsed.lineColor)
+					? parsed.lineColor
+					: DEFAULT_UI_SETTINGS.lineColor,
+			labelColor:
+				typeof parsed.labelColor === "string" && /^#[0-9a-fA-F]{6}$/.test(parsed.labelColor)
+					? parsed.labelColor
+					: DEFAULT_UI_SETTINGS.labelColor,
+			fontSize: Math.max(8, Math.min(96, parseInt(parsed.fontSize) || DEFAULT_UI_SETTINGS.fontSize)),
+			labelPlacement:
+				parsed.labelPlacement === "above" ||
+				parsed.labelPlacement === "center" ||
+				parsed.labelPlacement === "below"
+					? parsed.labelPlacement
+					: DEFAULT_UI_SETTINGS.labelPlacement,
+			lineWidth: Math.max(1, Math.min(64, parseFloat(parsed.lineWidth) || DEFAULT_UI_SETTINGS.lineWidth)),
+		};
+	} catch (e) {
+		return DEFAULT_UI_SETTINGS;
+	}
+}
+
+function saveUiSettings(settings) {
+	var safe = {
+		colorMode:
+			settings.colorMode === "auto-dark" || settings.colorMode === "auto-light" || settings.colorMode === "manual"
+				? settings.colorMode
+				: DEFAULT_UI_SETTINGS.colorMode,
+		lineColor:
+			typeof settings.lineColor === "string" && /^#[0-9a-fA-F]{6}$/.test(settings.lineColor)
+				? settings.lineColor
+				: DEFAULT_UI_SETTINGS.lineColor,
+		labelColor:
+			typeof settings.labelColor === "string" && /^#[0-9a-fA-F]{6}$/.test(settings.labelColor)
+				? settings.labelColor
+				: DEFAULT_UI_SETTINGS.labelColor,
+		fontSize: Math.max(8, Math.min(96, parseInt(settings.fontSize) || DEFAULT_UI_SETTINGS.fontSize)),
+		labelPlacement:
+			settings.labelPlacement === "above" ||
+			settings.labelPlacement === "center" ||
+			settings.labelPlacement === "below"
+				? settings.labelPlacement
+				: DEFAULT_UI_SETTINGS.labelPlacement,
+		lineWidth: Math.max(1, Math.min(64, parseFloat(settings.lineWidth) || DEFAULT_UI_SETTINGS.lineWidth)),
+	};
+	figma.root.setPluginData("uiSettings", JSON.stringify(safe));
+}
+
+function suppressNodeChanges(ids) {
+	if (!ids) return;
+	var arr = Array.isArray(ids) ? ids : [ids];
+	for (var i = 0; i < arr.length; i++) {
+		if (arr[i]) suppressedChangeIds[arr[i]] = true;
+	}
+}
+
+function unsuppressNodeChanges(ids) {
+	if (!ids) return;
+	var arr = Array.isArray(ids) ? ids : [ids];
+	for (var i = 0; i < arr.length; i++) {
+		if (arr[i]) delete suppressedChangeIds[arr[i]];
+	}
+}
+
+function isNodeChangeSuppressed(id) {
+	return !!suppressedChangeIds[id];
+}
 
 // ── Startup: restore state from document ─────────────────────────────────────
 
@@ -100,6 +186,7 @@ async function init() {
 		lineCount: Object.keys(measuredLines).length,
 		calibrations: calibrations,
 		rootGroups: rootGroupsInit,
+		settings: readUiSettings(),
 	};
 
 	// Send now — UI may already be ready (reopening plugin)
@@ -227,6 +314,49 @@ function resolveScaleForNode(node, globalPxPerCm) {
 	return { pxPerCm: globalPxPerCm, source: "global" };
 }
 
+function getSelectionScaleInfo() {
+	var sel = figma.currentPage.selection;
+	var globalScale = parseFloat(figma.root.getPluginData("globalScale")) || 0;
+	if (!sel || sel.length === 0) {
+		return { pxPerCm: globalScale, source: "global" };
+	}
+	return resolveScaleForNode(sel[0], globalScale);
+}
+
+function postSelectionScaleInfo() {
+	var info = getSelectionScaleInfo();
+	figma.ui.postMessage({ type: "scale-info", pxPerCm: info.pxPerCm, source: info.source });
+}
+
+function collectMeasuredVectorIdsFromSelection(selection) {
+	var out = {};
+	var measuredIds = Object.keys(measuredLines);
+	for (var i = 0; i < selection.length; i++) {
+		var n = selection[i];
+		if (measuredLines[n.id]) {
+			out[n.id] = true;
+			continue;
+		}
+		// If user selects a label pill/text directly, map it back to its vector.
+		for (var mi = 0; mi < measuredIds.length; mi++) {
+			var vid = measuredIds[mi];
+			var entry = measuredLines[vid];
+			if (entry && (entry.pillId === n.id || entry.textId === n.id)) {
+				out[vid] = true;
+				break;
+			}
+		}
+		// Also support selecting plugin groups/frames containing measured vectors
+		if (typeof n.findAll === "function") {
+			var vectors = n.findAll(function (child) {
+				return child.type === "VECTOR" && !!measuredLines[child.id];
+			});
+			for (var vi = 0; vi < vectors.length; vi++) out[vectors[vi].id] = true;
+		}
+	}
+	return Object.keys(out);
+}
+
 // ── Document change handler ───────────────────────────────────────────────────
 
 async function handleDocumentChange(event) {
@@ -271,13 +401,17 @@ async function handleDocumentChange(event) {
 			var e = measuredLines[entryKeys[k]];
 			var isLabel = e.pillId === nodeId || e.textId === nodeId;
 			if (isLabel && change.type === "PROPERTY_CHANGE") {
-				if (suppressChangeFor === nodeId) continue;
+				if (isNodeChangeSuppressed(nodeId)) continue;
 				e.labelManuallyMoved = true;
 				saveMeasuredLine(entryKeys[k], e);
 			}
 		}
 	}
 }
+
+figma.on("selectionchange", function () {
+	postSelectionScaleInfo();
+});
 
 // ── Message handler ───────────────────────────────────────────────────────────
 
@@ -313,8 +447,14 @@ figma.ui.onmessage = async function (msg) {
 				lineCount: Object.keys(measuredLines).length,
 				calibrations: cals,
 				rootGroups: rootGs,
+				settings: readUiSettings(),
 			});
 		}
+		postSelectionScaleInfo();
+	}
+
+	if (msg.type === "save-settings") {
+		saveUiSettings(msg.settings || {});
 	}
 
 	// ── Measure ──────────────────────────────────────────────
@@ -325,6 +465,7 @@ figma.ui.onmessage = async function (msg) {
 		var labelColor = msg.labelColor;
 		var lineColor = msg.lineColor;
 		var labelPlacement = msg.labelPlacement || "above";
+		var lineWidth = Math.max(1, Math.min(64, parseFloat(msg.lineWidth) || 8));
 		var selection = figma.currentPage.selection;
 
 		if (selection.length === 0) {
@@ -336,6 +477,7 @@ figma.ui.onmessage = async function (msg) {
 		saveGlobalScale(pxPerCm);
 
 		var results = [];
+		var movedLabelIds = [];
 
 		for (var i = 0; i < selection.length; i++) {
 			var node = selection[i];
@@ -352,7 +494,7 @@ figma.ui.onmessage = async function (msg) {
 			var resolved = resolveColors(colorMode, labelColor, lineColor, node.id);
 
 			node.strokes = [{ type: "SOLID", color: hexToRgb(resolved.line) }];
-			if (!node.strokeWeight || node.strokeWeight < 1) node.strokeWeight = 2;
+			node.strokeWeight = lineWidth;
 
 			// Update existing
 			if (measuredLines[node.id]) {
@@ -363,13 +505,18 @@ figma.ui.onmessage = async function (msg) {
 				ex.lineColor = resolved.line;
 				ex.fontSize = fontSize || 14;
 				ex.labelPlacement = labelPlacement;
+				ex.lineWidth = lineWidth;
 				ex.lastPathLength = pathLength;
 				if (geomChanged) ex.labelManuallyMoved = false;
 
 				try {
 					var exLabel = await figma.getNodeByIdAsync(ex.pillId || ex.textId);
 					if (exLabel) {
-						await updateLabel(node, exLabel, ex, geomChanged || !ex.labelManuallyMoved);
+						var shouldReposition = geomChanged || !ex.labelManuallyMoved;
+						// Respect manual placement: only auto-reposition when geometry changed
+						// or when the label has not been manually moved.
+						await updateLabel(node, exLabel, ex, shouldReposition);
+						if (shouldReposition) movedLabelIds.push(exLabel.id);
 						saveMeasuredLine(node.id, ex);
 						results.push(
 							formatLength(pathLength / usedScale) +
@@ -397,6 +544,7 @@ figma.ui.onmessage = async function (msg) {
 
 			groupParent.appendChild(pill);
 			positionLabelParallel(node, pill, labelPlacement);
+			movedLabelIds.push(pill.id);
 
 			var group = figma.group([node, pill], groupParent);
 			group.name = "Line: " + labelText;
@@ -413,11 +561,13 @@ figma.ui.onmessage = async function (msg) {
 				lastPathLength: pathLength,
 				labelManuallyMoved: false,
 				labelPlacement: labelPlacement,
+				lineWidth: lineWidth,
 				colorIndex: colorMode !== "manual" ? lineColorIndex - 1 : -1,
 			};
 			saveMeasuredLine(node.id, newEntry);
 			results.push(labelText + (scaleInfo.source !== "global" ? " [" + scaleInfo.source + "]" : ""));
 		}
+		await relaxMovableLabelOverlaps(movedLabelIds, 3);
 
 		figma.ui.postMessage({ type: "result", text: "✓ Measured: " + results.join(" · ") });
 	}
@@ -578,13 +728,7 @@ figma.ui.onmessage = async function (msg) {
 
 	// ── Get scale for current selection ──────────────────────
 	if (msg.type === "get-selection-scale") {
-		var sel = figma.currentPage.selection;
-		if (sel.length === 0) {
-			figma.ui.postMessage({ type: "scale-info", source: "global", name: null });
-			return;
-		}
-		var globalScale = parseFloat(figma.root.getPluginData("globalScale")) || 0;
-		var info = resolveScaleForNode(sel[0], globalScale);
+		var info = getSelectionScaleInfo();
 		figma.ui.postMessage({ type: "scale-info", pxPerCm: info.pxPerCm, source: info.source });
 	}
 
@@ -596,12 +740,14 @@ figma.ui.onmessage = async function (msg) {
 		var labelColor = msg.labelColor;
 		var lineColor = msg.lineColor;
 		var labelPlacement = msg.labelPlacement || "above";
+		var lineWidth = Math.max(1, Math.min(64, parseFloat(msg.lineWidth) || 8));
 
 		await figma.loadFontAsync({ family: "Inter", style: "Bold" });
 		saveGlobalScale(pxPerCm);
 
 		var count = 0;
 		var keys = Object.keys(measuredLines);
+		var movedLabelIds = [];
 
 		for (var k = 0; k < keys.length; k++) {
 			var nodeId = keys[k];
@@ -627,16 +773,19 @@ figma.ui.onmessage = async function (msg) {
 					entry.lineColor = resolved.line;
 					entry.fontSize = fontSize || 14;
 					entry.labelPlacement = labelPlacement;
+					entry.lineWidth = lineWidth;
 
 					vNode.strokes = [{ type: "SOLID", color: hexToRgb(resolved.line) }];
+					vNode.strokeWeight = lineWidth;
 
 					var newLen = getTotalPathLength(vNode);
 					var geomChanged = Math.abs(newLen - entry.lastPathLength) > 0.5;
-					if (geomChanged) {
-						entry.lastPathLength = newLen;
-						entry.labelManuallyMoved = false;
-					}
-					await updateLabel(vNode, lNode, entry, geomChanged || !entry.labelManuallyMoved);
+					entry.lastPathLength = newLen;
+					if (geomChanged) entry.labelManuallyMoved = false;
+					// Respect manual placement unless geometry changed.
+					var shouldReposition = geomChanged || !entry.labelManuallyMoved;
+					await updateLabel(vNode, lNode, entry, shouldReposition);
+					if (shouldReposition) movedLabelIds.push(lNode.id);
 					saveMeasuredLine(nodeId, entry);
 
 					if (entry.groupId) {
@@ -651,26 +800,68 @@ figma.ui.onmessage = async function (msg) {
 				removeMeasuredLine(nodeId);
 			}
 		}
+
+		// Extra settle rounds for auto-positioned labels only.
+		// Manual-moved labels are intentionally left untouched.
+		for (var round = 0; round < 5; round++) {
+			var settleKeys = Object.keys(measuredLines);
+			for (var sk = 0; sk < settleKeys.length; sk++) {
+				var settleNodeId = settleKeys[sk];
+				var settleEntry = measuredLines[settleNodeId];
+				if (settleEntry.labelManuallyMoved) continue;
+				try {
+					var svNode = await figma.getNodeByIdAsync(settleNodeId);
+					var slNode = await figma.getNodeByIdAsync(settleEntry.pillId || settleEntry.textId);
+					if (svNode && slNode) {
+						await updateLabel(svNode, slNode, settleEntry, true);
+						saveMeasuredLine(settleNodeId, settleEntry);
+					}
+				} catch (se) {
+					/* ignore settle failures per-node */
+				}
+			}
+		}
+		await relaxMovableLabelOverlaps(movedLabelIds, 4);
 		figma.ui.postMessage({ type: "result", text: "✓ Updated " + count + " line(s)" });
 	}
 
 	// ── Reset label position ──────────────────────────────────
 	if (msg.type === "reset-label-position") {
-		var sel = figma.currentPage.selection;
-		for (var i = 0; i < sel.length; i++) {
-			var entry = measuredLines[sel[i].id];
+		var targetIds = collectMeasuredVectorIdsFromSelection(figma.currentPage.selection);
+		var movedLabelIds = [];
+		for (var i = 0; i < targetIds.length; i++) {
+			var vectorId = targetIds[i];
+			var entry = measuredLines[vectorId];
 			if (entry) {
 				try {
-					var vNode = await figma.getNodeByIdAsync(sel[i].id);
+					var vNode = await figma.getNodeByIdAsync(vectorId);
 					var lNode = await figma.getNodeByIdAsync(entry.pillId || entry.textId);
 					if (vNode && lNode) {
 						entry.labelManuallyMoved = false;
 						await updateLabel(vNode, lNode, entry, true);
-						saveMeasuredLine(sel[i].id, entry);
+						movedLabelIds.push(lNode.id);
+						saveMeasuredLine(vectorId, entry);
 					}
 				} catch (e) {}
 			}
 		}
+		// Settle pass for selected labels so stagger/collision gets recomputed together.
+		for (var round = 0; round < 4; round++) {
+			for (var si = 0; si < targetIds.length; si++) {
+				var settleId = targetIds[si];
+				var settleEntry = measuredLines[settleId];
+				if (!settleEntry) continue;
+				try {
+					var sv = await figma.getNodeByIdAsync(settleId);
+					var sl = await figma.getNodeByIdAsync(settleEntry.pillId || settleEntry.textId);
+					if (sv && sl) {
+						await updateLabel(sv, sl, settleEntry, true);
+						saveMeasuredLine(settleId, settleEntry);
+					}
+				} catch (se) {}
+			}
+		}
+		await relaxMovableLabelOverlaps(movedLabelIds, 4);
 		figma.ui.postMessage({ type: "result", text: "✓ Label position reset" });
 	}
 };
@@ -692,20 +883,20 @@ async function updateLabel(vectorNode, pillOrText, entry, reposition) {
 			}
 		}
 		if (textChild) {
-			suppressChangeFor = pillOrText.id;
+			suppressNodeChanges([pillOrText.id, textChild.id]);
 			await updatePill(pillOrText, textChild, labelText, entry.fontSize || 14, entry.labelColor);
-			suppressChangeFor = null;
+			unsuppressNodeChanges([pillOrText.id, textChild.id]);
 		}
 		if (reposition) positionLabelParallel(vectorNode, pillOrText, entry.labelPlacement);
 	} else {
 		// Legacy plain text
-		suppressChangeFor = pillOrText.id;
+		suppressNodeChanges(pillOrText.id);
 		await figma.loadFontAsync({ family: "Inter", style: "Bold" });
 		pillOrText.characters = labelText;
 		pillOrText.fontSize = entry.fontSize || 14;
 		pillOrText.fills = [{ type: "SOLID", color: hexToRgb(entry.labelColor) }];
 		if (reposition) positionLabelParallel(vectorNode, pillOrText, entry.labelPlacement);
-		suppressChangeFor = null;
+		unsuppressNodeChanges(pillOrText.id);
 	}
 }
 
@@ -718,6 +909,162 @@ function resolveColors(colorMode, manualLabel, manualLine, nodeId) {
 	var idx = entry && entry.colorIndex >= 0 ? entry.colorIndex : lineColorIndex;
 	var hex = palette[idx % palette.length];
 	return { line: hex, label: hex };
+}
+
+function getNodeAABBAbsolute(node) {
+	var t = node.absoluteTransform;
+	var w = node.width || 0;
+	var h = node.height || 0;
+	var p1 = { x: t[0][2], y: t[1][2] };
+	var p2 = { x: t[0][0] * w + t[0][2], y: t[1][0] * w + t[1][2] };
+	var p3 = { x: t[0][1] * h + t[0][2], y: t[1][1] * h + t[1][2] };
+	var p4 = { x: t[0][0] * w + t[0][1] * h + t[0][2], y: t[1][0] * w + t[1][1] * h + t[1][2] };
+	var minX = Math.min(p1.x, p2.x, p3.x, p4.x);
+	var maxX = Math.max(p1.x, p2.x, p3.x, p4.x);
+	var minY = Math.min(p1.y, p2.y, p3.y, p4.y);
+	var maxY = Math.max(p1.y, p2.y, p3.y, p4.y);
+	return { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
+}
+
+function getLabelAABBForCandidate(textNode, parentNode, centerX, centerY, angleRad) {
+	var w = textNode.width || 0;
+	var h = textNode.height || 0;
+	var hw = w / 2;
+	var hh = h / 2;
+	var cosA = Math.cos(angleRad);
+	var sinA = Math.sin(angleRad);
+
+	var corners = [
+		{ x: -hw, y: -hh },
+		{ x: hw, y: -hh },
+		{ x: -hw, y: hh },
+		{ x: hw, y: hh },
+	];
+
+	var pt = parentNode.absoluteTransform;
+	var minX = Number.POSITIVE_INFINITY;
+	var minY = Number.POSITIVE_INFINITY;
+	var maxX = Number.NEGATIVE_INFINITY;
+	var maxY = Number.NEGATIVE_INFINITY;
+
+	for (var i = 0; i < corners.length; i++) {
+		var c = corners[i];
+		var localX = centerX + c.x * cosA - c.y * sinA;
+		var localY = centerY + c.x * sinA + c.y * cosA;
+		var absX = pt[0][0] * localX + pt[0][1] * localY + pt[0][2];
+		var absY = pt[1][0] * localX + pt[1][1] * localY + pt[1][2];
+		if (absX < minX) minX = absX;
+		if (absX > maxX) maxX = absX;
+		if (absY < minY) minY = absY;
+		if (absY > maxY) maxY = absY;
+	}
+	return { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
+}
+
+function rectsOverlap(a, b, pad) {
+	var p = pad || 0;
+	return !(a.maxX + p <= b.minX || a.minX >= b.maxX + p || a.maxY + p <= b.minY || a.minY >= b.maxY + p);
+}
+
+function overlapArea(a, b, pad) {
+	var p = pad || 0;
+	var left = Math.max(a.minX, b.minX - p);
+	var right = Math.min(a.maxX, b.maxX + p);
+	var top = Math.max(a.minY, b.minY - p);
+	var bottom = Math.min(a.maxY, b.maxY + p);
+	if (right <= left || bottom <= top) return 0;
+	return (right - left) * (bottom - top);
+}
+
+async function relaxMovableLabelOverlaps(movableLabelIds, rounds) {
+	if (!movableLabelIds || movableLabelIds.length === 0) return;
+	var movableSet = {};
+	for (var i = 0; i < movableLabelIds.length; i++) {
+		if (movableLabelIds[i]) movableSet[movableLabelIds[i]] = true;
+	}
+
+	for (var round = 0; round < (rounds || 2); round++) {
+		var allLabels = figma.currentPage.findAll(function (n) {
+			return n.getPluginData && n.getPluginData("pluginLabel") === "1";
+		});
+		var states = [];
+		for (var li = 0; li < allLabels.length; li++) {
+			var lbl = allLabels[li];
+			var b = getNodeAABBAbsolute(lbl);
+			var cx = (b.minX + b.maxX) * 0.5;
+			var cy = (b.minY + b.maxY) * 0.5;
+			var rt = lbl.relativeTransform;
+			var tx = rt[0][0];
+			var ty = rt[1][0];
+			var tLen = Math.sqrt(tx * tx + ty * ty) || 1;
+			states.push({
+				id: lbl.id,
+				node: lbl,
+				bounds: b,
+				cx: cx,
+				cy: cy,
+				tx: tx / tLen,
+				ty: ty / tLen,
+				width: lbl.width || 0,
+				movable: !!movableSet[lbl.id],
+			});
+		}
+
+		var deltaById = {};
+		for (var si = 0; si < states.length; si++) {
+			if (states[si].movable) deltaById[states[si].id] = 0;
+		}
+
+		for (var a = 0; a < states.length; a++) {
+			var A = states[a];
+			if (!A.movable) continue;
+			for (var b = 0; b < states.length; b++) {
+				if (a === b) continue;
+				var B = states[b];
+				var pad = Math.max(8, Math.min(20, (A.width + B.width) * 0.05));
+				if (!rectsOverlap(A.bounds, B.bounds, pad)) continue;
+
+				var overlapX = Math.min(A.bounds.maxX, B.bounds.maxX) - Math.max(A.bounds.minX, B.bounds.minX);
+				var overlapY = Math.min(A.bounds.maxY, B.bounds.maxY) - Math.max(A.bounds.minY, B.bounds.minY);
+				var penetration = Math.max(6, Math.min(60, Math.min(overlapX, overlapY) + pad));
+
+				var proj = (A.cx - B.cx) * A.tx + (A.cy - B.cy) * A.ty;
+				var sign;
+				if (Math.abs(proj) < 1) sign = A.id > B.id ? 1 : -1;
+				else sign = proj >= 0 ? 1 : -1;
+				deltaById[A.id] += sign * penetration * 0.55;
+			}
+		}
+
+		var movedAny = false;
+		var deltaIds = Object.keys(deltaById);
+		for (var di = 0; di < deltaIds.length; di++) {
+			var id = deltaIds[di];
+			var delta = deltaById[id];
+			if (Math.abs(delta) < 0.5) continue;
+			var st = null;
+			for (var sj = 0; sj < states.length; sj++) {
+				if (states[sj].id === id) {
+					st = states[sj];
+					break;
+				}
+			}
+			if (!st) continue;
+			var maxStep = Math.max(12, st.width * 0.9);
+			var clamped = Math.max(-maxStep, Math.min(maxStep, delta));
+			var dx = st.tx * clamped;
+			var dy = st.ty * clamped;
+			var rt2 = st.node.relativeTransform;
+			suppressNodeChanges(st.node.id);
+			st.node.relativeTransform = [
+				[rt2[0][0], rt2[0][1], rt2[0][2] + dx],
+				[rt2[1][0], rt2[1][1], rt2[1][2] + dy],
+			];
+			unsuppressNodeChanges(st.node.id);
+			movedAny = true;
+		}
+		if (!movedAny) break;
+	}
 }
 
 // ── Position label at true 50% path midpoint ─────────────────────────────────
@@ -746,46 +1093,150 @@ function positionLabelParallel(vectorNode, textNode, placement) {
 					e,
 				)
 			: Math.sqrt(Math.pow(e.x - s.x, 2) + Math.pow(e.y - s.y, 2));
-		segments.push({ s: s, e: e, ts: ts, te: te, len: len, curved: curved });
+		var startDist = totalLen;
+		segments.push({
+			s: s,
+			e: e,
+			ts: ts,
+			te: te,
+			len: len,
+			curved: curved,
+			startDist: startDist,
+			endDist: startDist + len,
+		});
 		totalLen += len;
 	}
 
-	var target = totalLen * 0.5;
-	var walked = 0;
-	var midPt = { x: 0, y: 0 };
-	var tangent = { x: 1, y: 0 };
+	function evaluateAtDistance(distanceAlongPath) {
+		var targetDist = Math.max(0, Math.min(totalLen, distanceAlongPath));
+		var walkedDist = 0;
+		var point = { x: 0, y: 0 };
+		var tan = { x: 1, y: 0 };
+		var segIndex = 0;
+		var tOnSeg = 0;
 
-	for (var j = 0; j < segments.length; j++) {
-		var item = segments[j];
-		if (walked + item.len >= target || j === segments.length - 1) {
-			var t = item.len > 0 ? (target - walked) / item.len : 0;
-			t = Math.max(0, Math.min(1, t));
-			if (item.curved) {
-				var p0 = item.s;
-				var p1 = { x: item.s.x + (item.ts ? item.ts.x : 0), y: item.s.y + (item.ts ? item.ts.y : 0) };
-				var p2 = { x: item.e.x + (item.te ? item.te.x : 0), y: item.e.y + (item.te ? item.te.y : 0) };
-				var p3 = item.e;
-				var mt = 1 - t;
-				midPt.x = mt * mt * mt * p0.x + 3 * mt * mt * t * p1.x + 3 * mt * t * t * p2.x + t * t * t * p3.x;
-				midPt.y = mt * mt * mt * p0.y + 3 * mt * mt * t * p1.y + 3 * mt * t * t * p2.y + t * t * t * p3.y;
-				tangent.x = 3 * mt * mt * (p1.x - p0.x) + 6 * mt * t * (p2.x - p1.x) + 3 * t * t * (p3.x - p2.x);
-				tangent.y = 3 * mt * mt * (p1.y - p0.y) + 6 * mt * t * (p2.y - p1.y) + 3 * t * t * (p3.y - p2.y);
-			} else {
-				midPt.x = item.s.x + t * (item.e.x - item.s.x);
-				midPt.y = item.s.y + t * (item.e.y - item.s.y);
-				tangent.x = item.e.x - item.s.x;
-				tangent.y = item.e.y - item.s.y;
+		for (var sj = 0; sj < segments.length; sj++) {
+			var segItem = segments[sj];
+			if (walkedDist + segItem.len >= targetDist || sj === segments.length - 1) {
+				var tLocal = segItem.len > 0 ? (targetDist - walkedDist) / segItem.len : 0;
+				tLocal = Math.max(0, Math.min(1, tLocal));
+				segIndex = sj;
+				tOnSeg = tLocal;
+
+				if (segItem.curved) {
+					var cp0 = segItem.s;
+					var cp1 = {
+						x: segItem.s.x + (segItem.ts ? segItem.ts.x : 0),
+						y: segItem.s.y + (segItem.ts ? segItem.ts.y : 0),
+					};
+					var cp2 = {
+						x: segItem.e.x + (segItem.te ? segItem.te.x : 0),
+						y: segItem.e.y + (segItem.te ? segItem.te.y : 0),
+					};
+					var cp3 = segItem.e;
+					var mtLocal = 1 - tLocal;
+					point.x =
+						mtLocal * mtLocal * mtLocal * cp0.x +
+						3 * mtLocal * mtLocal * tLocal * cp1.x +
+						3 * mtLocal * tLocal * tLocal * cp2.x +
+						tLocal * tLocal * tLocal * cp3.x;
+					point.y =
+						mtLocal * mtLocal * mtLocal * cp0.y +
+						3 * mtLocal * mtLocal * tLocal * cp1.y +
+						3 * mtLocal * tLocal * tLocal * cp2.y +
+						tLocal * tLocal * tLocal * cp3.y;
+					tan.x =
+						3 * mtLocal * mtLocal * (cp1.x - cp0.x) +
+						6 * mtLocal * tLocal * (cp2.x - cp1.x) +
+						3 * tLocal * tLocal * (cp3.x - cp2.x);
+					tan.y =
+						3 * mtLocal * mtLocal * (cp1.y - cp0.y) +
+						6 * mtLocal * tLocal * (cp2.y - cp1.y) +
+						3 * tLocal * tLocal * (cp3.y - cp2.y);
+				} else {
+					point.x = segItem.s.x + tLocal * (segItem.e.x - segItem.s.x);
+					point.y = segItem.s.y + tLocal * (segItem.e.y - segItem.s.y);
+					tan.x = segItem.e.x - segItem.s.x;
+					tan.y = segItem.e.y - segItem.s.y;
+				}
+				break;
 			}
-			break;
+			walkedDist += segItem.len;
 		}
-		walked += item.len;
+
+		return { point: point, tangent: tan, segmentIndex: segIndex, tOnSegment: tOnSeg };
 	}
 
-	var angleRad = Math.atan2(tangent.y, tangent.x);
-	var angleDeg = angleRad * (180 / Math.PI);
-	var displayAngle = angleDeg;
-	if (displayAngle > 90) displayAngle -= 180;
-	if (displayAngle < -90) displayAngle += 180;
+	var target = totalLen * 0.5;
+	var evalMid = evaluateAtDistance(target);
+
+	// Placement strategy:
+	// 1) Place on a single segment (between two points), not on full path midpoint.
+	// 2) Prefer the longest segment that can fit the label.
+	// 3) If multiple fit similarly, prefer the one closer to overall path middle.
+	// 4) If none can fit, still use the longest segment and place in its midpoint.
+	var minFitLen = Math.max(24, textNode.width * 0.9);
+	var chosenSeg = null;
+	var longestSeg = null;
+	for (var si = 0; si < segments.length; si++) {
+		var segCandidate = segments[si];
+		if (!longestSeg || segCandidate.len > longestSeg.len) longestSeg = segCandidate;
+		if (segCandidate.len < minFitLen) continue;
+
+		if (!chosenSeg) {
+			chosenSeg = segCandidate;
+			continue;
+		}
+
+		var lenDelta = segCandidate.len - chosenSeg.len;
+		if (lenDelta > 4) {
+			chosenSeg = segCandidate;
+			continue;
+		}
+		if (Math.abs(lenDelta) <= 4) {
+			var candCenter = segCandidate.startDist + segCandidate.len * 0.5;
+			var chosenCenter = chosenSeg.startDist + chosenSeg.len * 0.5;
+			if (Math.abs(candCenter - target) < Math.abs(chosenCenter - target)) {
+				chosenSeg = segCandidate;
+			}
+		}
+	}
+	if (!chosenSeg) chosenSeg = longestSeg;
+	evalMid = evaluateAtDistance(chosenSeg.startDist + chosenSeg.len * 0.5);
+
+	var midPt = evalMid.point;
+	var tangent = evalMid.tangent;
+
+	// Convert midpoint and tangent from vector-local space to parent space.
+	// This keeps label alignment correct even when the vector itself is transformed/rotated.
+	var vt = vectorNode.relativeTransform;
+	var va = vt[0][0];
+	var vc = vt[0][1];
+	var ve = vt[0][2];
+	var vb = vt[1][0];
+	var vd = vt[1][1];
+	var vf = vt[1][2];
+
+	var midParentX = va * midPt.x + vc * midPt.y + ve;
+	var midParentY = vb * midPt.x + vd * midPt.y + vf;
+
+	var tanParentX = va * tangent.x + vc * tangent.y;
+	var tanParentY = vb * tangent.x + vd * tangent.y;
+
+	var tangentLen = Math.sqrt(tanParentX * tanParentX + tanParentY * tanParentY) || 1;
+	var tx = tanParentX / tangentLen;
+	var ty = tanParentY / tangentLen;
+	var nx = -ty; // unit normal
+	var ny = tx;
+
+	var angleRad = Math.atan2(ty, tx);
+	// Keep text readable (not upside down)
+	if (angleRad > Math.PI / 2) angleRad -= Math.PI;
+	if (angleRad < -Math.PI / 2) angleRad += Math.PI;
+	// Canonical tangent for along-line collision spreading.
+	// This removes dependence on vector draw direction.
+	var slideTx = Math.cos(angleRad);
+	var slideTy = Math.sin(angleRad);
 
 	// strokeWeight of the line (default 2 if not set)
 	var strokeW = vectorNode.strokeWeight || 2;
@@ -795,24 +1246,125 @@ function positionLabelParallel(vectorNode, textNode, placement) {
 
 	var offsetDist;
 	if (placement === "center") {
-		// Place label exactly on the line — no perpendicular offset
 		offsetDist = 0;
 	} else {
-		// Half the stroke + half the label height + 4px breathing room
-		offsetDist = strokeW / 2 + labelH / 2 + 4;
-		if (placement === "below") {
-			// Flip perpendicular direction
-			offsetDist = -offsetDist;
+		// Half stroke + half pill + breathing room.
+		// Slightly larger gap gives a cleaner visual separation on thick strokes.
+		offsetDist = strokeW / 2 + labelH / 2 + 6;
+		// In Figma's Y-down coordinate system, the unit normal used here points to visual "below".
+		// Flip signs so UI semantics are intuitive: Above => up side, Below => down side.
+		if (placement === "above") offsetDist = -offsetDist;
+	}
+
+	var centerX = midParentX + nx * offsetDist;
+	var centerY = midParentY + ny * offsetDist;
+
+	// Try to avoid overlap with other plugin labels already on canvas.
+	var parentNode = textNode.parent;
+	var otherLabelBounds = [];
+	var allLabels = figma.currentPage.findAll(function (n) {
+		return n.getPluginData && n.getPluginData("pluginLabel") === "1";
+	});
+	for (var li = 0; li < allLabels.length; li++) {
+		var lbl = allLabels[li];
+		if (lbl.id === textNode.id) continue;
+		otherLabelBounds.push({ id: lbl.id, bounds: getNodeAABBAbsolute(lbl) });
+	}
+	var collisionPad = Math.max(8, ((textNode.horizontalPadding || 0) + (textNode.verticalPadding || 0)) * 0.5 + 2);
+
+	function hasOverlap(candidateCenterX, candidateCenterY) {
+		var cand = getLabelAABBForCandidate(textNode, parentNode, candidateCenterX, candidateCenterY, angleRad);
+		for (var bi = 0; bi < otherLabelBounds.length; bi++) {
+			if (rectsOverlap(cand, otherLabelBounds[bi].bounds, collisionPad)) return true;
+		}
+		return false;
+	}
+
+	function getOverlapScore(candidateCenterX, candidateCenterY) {
+		var cand = getLabelAABBForCandidate(textNode, parentNode, candidateCenterX, candidateCenterY, angleRad);
+		var total = 0;
+		for (var bi = 0; bi < otherLabelBounds.length; bi++) {
+			total += overlapArea(cand, otherLabelBounds[bi].bounds, collisionPad);
+		}
+		return total;
+	}
+
+	if (otherLabelBounds.length > 0 && hasOverlap(centerX, centerY)) {
+		// Only move pills along the line direction to keep visual centering stable.
+		var tangentShifts = [0];
+		var idHash = 0;
+		for (var ih = 0; ih < vectorNode.id.length; ih++) idHash += vectorNode.id.charCodeAt(ih);
+		var prefSign = idHash % 2 === 0 ? 1 : -1;
+		for (var ti = 1; ti <= 28; ti++) {
+			var step = 0.35 * ti;
+			tangentShifts.push(prefSign * step);
+			tangentShifts.push(-prefSign * step);
+		}
+		var tangentUnit = Math.max(14, textNode.width * 0.4);
+
+		// Deterministic peer-rank spread:
+		// if several labels overlap at base, spread them along tangent by id order
+		// with spacing based on pill width, so parallel lines visibly separate.
+		var baseAabb = getLabelAABBForCandidate(textNode, parentNode, centerX, centerY, angleRad);
+		var overlappingPeerIds = [];
+		for (var oi = 0; oi < otherLabelBounds.length; oi++) {
+			if (rectsOverlap(baseAabb, otherLabelBounds[oi].bounds, collisionPad)) {
+				overlappingPeerIds.push(otherLabelBounds[oi].id);
+			}
+		}
+		if (overlappingPeerIds.length > 0) {
+			overlappingPeerIds.push(textNode.id);
+			overlappingPeerIds.sort();
+			var myIndex = overlappingPeerIds.indexOf(textNode.id);
+			var centeredIndex = myIndex - (overlappingPeerIds.length - 1) / 2;
+			var spreadUnit = Math.max(textNode.width + collisionPad * 1.25, tangentUnit * 1.8);
+			centerX += slideTx * spreadUnit * centeredIndex;
+			centerY += slideTy * spreadUnit * centeredIndex;
+		}
+
+		var found = false;
+		var bestX = centerX;
+		var bestY = centerY;
+		var bestScore = getOverlapScore(centerX, centerY);
+
+		for (var ts = 0; ts < tangentShifts.length && !found; ts++) {
+			if (tangentShifts[ts] === 0) continue;
+			var trialX = centerX + slideTx * tangentUnit * tangentShifts[ts];
+			var trialY = centerY + slideTy * tangentUnit * tangentShifts[ts];
+			if (!hasOverlap(trialX, trialY)) {
+				centerX = trialX;
+				centerY = trialY;
+				found = true;
+				break;
+			}
+			var score = getOverlapScore(trialX, trialY);
+			if (score < bestScore) {
+				bestScore = score;
+				bestX = trialX;
+				bestY = trialY;
+			}
+		}
+		// If no fully clean position exists, at least choose the least-overlapping candidate.
+		if (!found) {
+			centerX = bestX;
+			centerY = bestY;
 		}
 	}
 
-	var perpRad = angleRad - Math.PI / 2;
+	// Position by transform so visual center stays exact after rotation.
+	var cosA = Math.cos(angleRad);
+	var sinA = Math.sin(angleRad);
+	var w = textNode.width;
+	var h = textNode.height;
+	var txm = centerX - cosA * (w / 2) + sinA * (h / 2);
+	var tym = centerY - sinA * (w / 2) - cosA * (h / 2);
 
-	suppressChangeFor = textNode.id;
-	textNode.x = vectorNode.x + midPt.x + Math.cos(perpRad) * offsetDist - textNode.width / 2;
-	textNode.y = vectorNode.y + midPt.y + Math.sin(perpRad) * offsetDist - textNode.height / 2;
-	textNode.rotation = -displayAngle;
-	suppressChangeFor = null;
+	suppressNodeChanges(textNode.id);
+	textNode.relativeTransform = [
+		[cosA, -sinA, txm],
+		[sinA, cosA, tym],
+	];
+	unsuppressNodeChanges(textNode.id);
 }
 
 // ── Path length ───────────────────────────────────────────────────────────────
@@ -917,8 +1469,7 @@ async function createPill(labelText, fontSize, bgHex) {
 
 // Update an existing pill's text + color
 async function updatePill(pillNode, textNode, labelText, fontSize, bgHex) {
-	suppressChangeFor = textNode.id;
-	suppressChangeFor = pillNode.id;
+	suppressNodeChanges([textNode.id, pillNode.id]);
 	await figma.loadFontAsync({ family: "Inter", style: "Bold" });
 	var textColor = isLightColor(bgHex) ? { r: 0.1, g: 0.1, b: 0.1 } : { r: 1, g: 1, b: 1 };
 	var pad = Math.round((fontSize || 14) * 0.5);
@@ -931,5 +1482,5 @@ async function updatePill(pillNode, textNode, labelText, fontSize, bgHex) {
 	pillNode.horizontalPadding = pad;
 	pillNode.verticalPadding = Math.round(pad * 0.5);
 	pillNode.name = labelText;
-	suppressChangeFor = null;
+	unsuppressNodeChanges([textNode.id, pillNode.id]);
 }

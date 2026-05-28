@@ -606,6 +606,21 @@
 							/>
 							<div class="badge">px</div>
 						</div>
+						<div class="field" style="margin-top: 8px; margin-bottom: 0">
+							<label>Line width</label>
+							<div class="row">
+								<input
+									type="number"
+									id="lineWidth"
+									value="8"
+									min="1"
+									max="64"
+									step="0.5"
+									oninput="updatePreview()"
+								/>
+								<div class="badge">px</div>
+							</div>
+						</div>
 						<div class="divider"></div>
 						<label>Preview</label>
 						<div class="preview-block">
@@ -702,14 +717,18 @@
 				if (name === "calibrate") {
 					parent.postMessage({ pluginMessage: { type: "get-root-groups" } }, "*");
 				}
+				if (name === "measure") {
+					parent.postMessage({ pluginMessage: { type: "get-selection-scale" } }, "*");
+				}
 			}
 
 			// ── Scale display ─────────────────────────────────────────────────────────────
-			function updateScaleDisplay(pxPerCm) {
+			function updateScaleDisplay(pxPerCm, source) {
 				activePxPerCm = parseFloat(pxPerCm) || 0;
 				var el = document.getElementById("scaleDisplay");
 				if (activePxPerCm > 0) {
-					el.textContent = "Scale: " + activePxPerCm.toFixed(4) + " px/cm";
+					var src = source && source !== "global" ? source : "global";
+					el.textContent = "Scale: " + activePxPerCm.toFixed(4) + " px/cm (" + src + ")";
 					el.classList.remove("unset");
 				} else {
 					el.textContent = "No scale set — go to Calibrate first";
@@ -805,7 +824,38 @@
 					lineColor: document.getElementById("lineColorHex").value || "#ff5500",
 					fontSize: parseInt(document.getElementById("fontSize").value) || 14,
 					labelPlacement: labelPlacement,
+					lineWidth: parseFloat(document.getElementById("lineWidth").value) || 8,
 				};
+			}
+
+			function saveSettings() {
+				var s = getSettings();
+				parent.postMessage({ pluginMessage: { type: "save-settings", settings: s } }, "*");
+			}
+
+			function applySettings(s) {
+				if (!s) return;
+				if (s.colorMode) setColorMode(s.colorMode);
+				if (s.lineColor && /^#[0-9a-fA-F]{6}$/.test(s.lineColor)) {
+					document.getElementById("lineColorHex").value = s.lineColor;
+					document.getElementById("lineColorPicker").value = s.lineColor;
+				}
+				if (s.labelColor && /^#[0-9a-fA-F]{6}$/.test(s.labelColor)) {
+					document.getElementById("labelColorHex").value = s.labelColor;
+					document.getElementById("labelColorPicker").value = s.labelColor;
+				}
+				if (s.fontSize) {
+					document.getElementById("fontSize").value = String(
+						Math.max(8, Math.min(96, parseInt(s.fontSize) || 14)),
+					);
+				}
+				if (s.lineWidth) {
+					document.getElementById("lineWidth").value = String(
+						Math.max(1, Math.min(64, parseFloat(s.lineWidth) || 8)),
+					);
+				}
+				if (s.labelPlacement) setPlacement(s.labelPlacement);
+				updatePreview();
 			}
 
 			function measure() {
@@ -823,6 +873,7 @@
 							labelColor: s.labelColor,
 							lineColor: s.lineColor,
 							fontSize: s.fontSize,
+							labelPlacement: s.labelPlacement,
 						},
 					},
 					"*",
@@ -845,6 +896,7 @@
 							labelColor: s.labelColor,
 							lineColor: s.lineColor,
 							fontSize: s.fontSize,
+							labelPlacement: s.labelPlacement,
 						},
 					},
 					"*",
@@ -868,6 +920,7 @@
 					below: "Label is offset below the line, clear of the stroke width.",
 				};
 				document.getElementById("placeHint").textContent = hints[p];
+				saveSettings();
 			}
 
 			function setColorMode(mode) {
@@ -887,6 +940,7 @@
 				document.getElementById("palettePreview").style.display = isManual ? "none" : "block";
 				if (!isManual) updatePalettePreview();
 				updatePreview();
+				saveSettings();
 			}
 
 			function updatePalettePreview() {
@@ -905,12 +959,14 @@
 			function syncColor(type) {
 				document.getElementById(type + "ColorHex").value = document.getElementById(type + "ColorPicker").value;
 				updatePreview();
+				saveSettings();
 			}
 			function syncColorHex(type) {
 				var hex = document.getElementById(type + "ColorHex").value;
 				if (/^#[0-9a-fA-F]{6}$/.test(hex)) {
 					document.getElementById(type + "ColorPicker").value = hex;
 					updatePreview();
+					saveSettings();
 				}
 			}
 
@@ -930,10 +986,13 @@
 						: (PALETTES[colorMode] || PALETTES["auto-dark"])[0];
 				var fontSize = Math.max(10, Math.min(20, parseInt(document.getElementById("fontSize").value) || 14));
 				var textColor = getLuminance(color) > 0.55 ? "#1a1a1a" : "#ffffff";
+				var lineWidth = Math.max(1, Math.min(64, parseFloat(document.getElementById("lineWidth").value) || 8));
 				document.getElementById("previewLine").style.background = color;
+				document.getElementById("previewLine").style.height = lineWidth + "px";
 				document.getElementById("previewPill").style.background = color;
 				document.getElementById("previewText").style.color = textColor;
 				document.getElementById("previewText").style.fontSize = fontSize + "px";
+				saveSettings();
 			}
 
 			// ── Status ────────────────────────────────────────────────────────────────────
@@ -950,7 +1009,8 @@
 				if (!msg) return;
 
 				if (msg.type === "restored") {
-					if (msg.globalScale && msg.globalScale > 0) updateScaleDisplay(msg.globalScale);
+					if (msg.settings) applySettings(msg.settings);
+					if (msg.globalScale && msg.globalScale > 0) updateScaleDisplay(msg.globalScale, "global");
 					if (msg.calibrations && msg.calibrations.length > 0) renderSavedCalibrations(msg.calibrations);
 					if (msg.rootGroups) populateSaveTo(msg.rootGroups);
 					if (msg.lineCount > 0)
@@ -963,7 +1023,7 @@
 					var g = (msg.list || []).find(function (c) {
 						return c.id === "global";
 					});
-					if (g && g.pxPerCm > 0) updateScaleDisplay(g.pxPerCm);
+					if (g && g.pxPerCm > 0) updateScaleDisplay(g.pxPerCm, "global");
 				}
 
 				if (msg.type === "root-groups") {
@@ -971,7 +1031,7 @@
 				}
 
 				if (msg.type === "calibrated") {
-					updateScaleDisplay(msg.pxPerCm);
+					updateScaleDisplay(msg.pxPerCm, "global");
 					if (msg.calibrations) renderSavedCalibrations(msg.calibrations);
 					var savedMsg =
 						msg.savedTo && msg.savedTo !== "none"
@@ -998,12 +1058,17 @@
 					var statusId = active.id === "tab-calibrate" ? "calib-status" : "measure-status";
 					showStatus(statusId, "⚠ " + msg.text, "err");
 				}
+
+				if (msg.type === "scale-info") {
+					updateScaleDisplay(msg.pxPerCm, msg.source || "global");
+				}
 			};
 
 			// ── Init ──────────────────────────────────────────────────────────────────────
 			updatePalettePreview();
 			updatePreview();
 			parent.postMessage({ pluginMessage: { type: "ui-ready" } }, "*");
+			parent.postMessage({ pluginMessage: { type: "get-selection-scale" } }, "*");
 		</script>
 	</body>
 </html>

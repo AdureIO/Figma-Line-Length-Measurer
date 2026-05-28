@@ -1,10 +1,10 @@
 {
-  "name": "Cable Length Measurer",
-  "id": "1641726522240399196",
-  "api": "1.0.0",
-  "main": "code.js",
-  "ui": "ui.html",
-  "editorType": ["figma"],
-  "networkAccess": { "allowedDomains": ["none"] },
-  "documentAccess": "dynamic-page"
+	"name": "Line Length Measurer",
+	"id": "1641726522240399196",
+	"api": "1.0.0",
+	"main": "code.js",
+	"ui": "ui.html",
+	"editorType": ["figma"],
+	"networkAccess": { "allowedDomains": ["none"] },
+	"documentAccess": "dynamic-page"
 }

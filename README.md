@@ -27,7 +27,7 @@ It supports straight and curved vector segments, per-frame/group scale overrides
 
 1. In Figma Desktop, open **Plugins > Development > Import plugin from manifest...**
 2. Select this project's `manifest.json`.
-3. Run the plugin from **Plugins > Development > Cable Length Measurer**.
+3. Run the plugin from **Plugins > Development > Line Length Measurer**.
 
 ## How to Use
 
