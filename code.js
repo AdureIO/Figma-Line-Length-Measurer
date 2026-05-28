@@ -155,6 +155,69 @@ function ensureEntryDefaults(entry) {
 	return entry;
 }
 
+function attachUiPrefsToEntry(entry) {
+	if (!entry) return entry;
+	var s = readUiSettings();
+	entry.uiPrefs = {
+		colorMode: s.colorMode,
+		lineColor: s.lineColor,
+		labelColor: s.labelColor,
+		fontSize: s.fontSize,
+		labelPlacement: s.labelPlacement,
+		lineWidth: s.lineWidth,
+		showPointMarkers: s.showPointMarkers,
+		elevationDisplayAtPoints: s.elevationDisplayAtPoints,
+		showHeightBadges: s.showHeightBadges,
+		showDiffBadges: s.showDiffBadges,
+		showSlopeBadges: s.showSlopeBadges,
+	};
+	return entry;
+}
+
+function uiSettingsFromLineEntry(entry) {
+	if (!entry) return null;
+	var p = entry.uiPrefs;
+	if (!p || typeof p !== "object") return null;
+	return {
+		colorMode:
+			p.colorMode === "auto-dark" || p.colorMode === "auto-light" || p.colorMode === "manual"
+				? p.colorMode
+				: entry.lineColor
+					? DEFAULT_UI_SETTINGS.colorMode
+					: DEFAULT_UI_SETTINGS.colorMode,
+		lineColor:
+			typeof p.lineColor === "string" && /^#[0-9a-fA-F]{6}$/.test(p.lineColor)
+				? p.lineColor
+				: typeof entry.lineColor === "string"
+					? entry.lineColor
+					: DEFAULT_UI_SETTINGS.lineColor,
+		labelColor:
+			typeof p.labelColor === "string" && /^#[0-9a-fA-F]{6}$/.test(p.labelColor)
+				? p.labelColor
+				: typeof entry.labelColor === "string"
+					? entry.labelColor
+					: DEFAULT_UI_SETTINGS.labelColor,
+		fontSize: Math.max(8, Math.min(96, parseInt(p.fontSize) || entry.fontSize || DEFAULT_UI_SETTINGS.fontSize)),
+		labelPlacement:
+			p.labelPlacement === "above" || p.labelPlacement === "center" || p.labelPlacement === "below"
+				? p.labelPlacement
+				: entry.labelPlacement || DEFAULT_UI_SETTINGS.labelPlacement,
+		lineWidth: Math.max(
+			1,
+			Math.min(64, parseFloat(p.lineWidth) || entry.lineWidth || DEFAULT_UI_SETTINGS.lineWidth),
+		),
+		showPointMarkers: readBoolSetting(p, "showPointMarkers", DEFAULT_UI_SETTINGS.showPointMarkers),
+		elevationDisplayAtPoints: readBoolSetting(
+			p,
+			"elevationDisplayAtPoints",
+			DEFAULT_UI_SETTINGS.elevationDisplayAtPoints,
+		),
+		showHeightBadges: readBoolSetting(p, "showHeightBadges", DEFAULT_UI_SETTINGS.showHeightBadges),
+		showDiffBadges: readBoolSetting(p, "showDiffBadges", DEFAULT_UI_SETTINGS.showDiffBadges),
+		showSlopeBadges: readBoolSetting(p, "showSlopeBadges", DEFAULT_UI_SETTINGS.showSlopeBadges),
+	};
+}
+
 function suppressNodeChanges(ids) {
 	if (!ids) return;
 	var arr = Array.isArray(ids) ? ids : [ids];
@@ -177,35 +240,583 @@ function isNodeChangeSuppressed(id) {
 
 // ── Startup: restore state from document ─────────────────────────────────────
 
+var PLUGIN_LINE_ENTRY = "lineEntry";
+var PLUGIN_LINE_VECTOR_ID = "pluginLineVectorId";
+
+function getNodePage(node) {
+	var cur = node;
+	while (cur && cur.type !== "PAGE") cur = cur.parent;
+	return cur;
+}
+
+function getNodeCenterInParent(node) {
+	if (!node || !("x" in node)) return null;
+	return { x: node.x + (node.width || 0) / 2, y: node.y + (node.height || 0) / 2 };
+}
+
+async function nodeExists(id) {
+	if (!id) return false;
+	try {
+		var n = await figma.getNodeByIdAsync(id);
+		return !!n;
+	} catch (e) {
+		return false;
+	}
+}
+
+function findLabelsInContainer(container) {
+	if (!container || typeof container.findAll !== "function") return [];
+	return container.findAll(function (n) {
+		return n.getPluginData && n.getPluginData("pluginLabel") === "1";
+	});
+}
+
+function pickClosestVector(vectors, refNode) {
+	if (!vectors || vectors.length === 0) return null;
+	if (vectors.length === 1) return vectors[0];
+	var rc = getNodeCenterInParent(refNode);
+	if (!rc) return vectors[0];
+	var best = vectors[0];
+	var bestD = Number.POSITIVE_INFINITY;
+	for (var vi = 0; vi < vectors.length; vi++) {
+		var vc = getNodeCenterInParent(vectors[vi]);
+		if (!vc) continue;
+		var dx = vc.x - rc.x;
+		var dy = vc.y - rc.y;
+		var d = dx * dx + dy * dy;
+		if (d < bestD) {
+			bestD = d;
+			best = vectors[vi];
+		}
+	}
+	return best;
+}
+
+function listMeasuredPathVectorsInContainer(container) {
+	var out = [];
+	if (!container || !container.children) return out;
+	for (var i = 0; i < container.children.length; i++) {
+		if (isMeasuredPathVector(container.children[i])) out.push(container.children[i]);
+	}
+	return out;
+}
+
+function pickClosestLabel(labels, vector) {
+	if (!labels || labels.length === 0) return null;
+	if (labels.length === 1) return labels[0];
+	var vc = getNodeCenterInParent(vector);
+	if (!vc) return labels[0];
+	var best = labels[0];
+	var bestD = Number.POSITIVE_INFINITY;
+	for (var i = 0; i < labels.length; i++) {
+		var lc = getNodeCenterInParent(labels[i]);
+		if (!lc) continue;
+		var dx = lc.x - vc.x;
+		var dy = lc.y - vc.y;
+		var d = dx * dx + dy * dy;
+		if (d < bestD) {
+			bestD = d;
+			best = labels[i];
+		}
+	}
+	return best;
+}
+
+async function findLabelForVector(vector) {
+	var parent = vector.parent;
+	if (parent) {
+		var inParent = pickClosestLabel(findLabelsInContainer(parent), vector);
+		if (inParent) return inParent;
+	}
+	var page = getNodePage(vector);
+	if (page) {
+		var linked = page.findAll(function (n) {
+			return n.getPluginData && n.getPluginData(PLUGIN_LINE_VECTOR_ID) === vector.id;
+		});
+		if (linked.length > 0) return linked[0];
+	}
+	return null;
+}
+
+function parseLineEntryJson(raw) {
+	if (!raw) return null;
+	try {
+		var entry = JSON.parse(raw);
+		ensureEntryDefaults(entry);
+		return entry;
+	} catch (e) {
+		return null;
+	}
+}
+
+function getPluginLineGroupForVector(vector) {
+	var parent = vector && vector.parent;
+	if (parent && parent.getPluginData && parent.getPluginData("pluginGroup") === "1") return parent;
+	return null;
+}
+
+function isPluginElevationNode(n) {
+	if (!n || !n.getPluginData) return false;
+	if (n.getPluginData("pluginElevationPoint") === "1") return true;
+	if (n.getPluginData("pluginElevationPointInfo") === "1") return true;
+	if (n.getPluginData("pluginElevationMarker") === "1") return true;
+	if (n.getPluginData("pluginElevationBadgeType")) return true;
+	return false;
+}
+
+function isMeasuredPathVector(n) {
+	if (!n || n.type !== "VECTOR" || isPluginElevationNode(n)) return false;
+	var vn = n.vectorNetwork;
+	return !!(vn && vn.vertices && vn.vertices.length >= 2);
+}
+
+function findLineVectorInContainer(container) {
+	if (!container || !container.children) return null;
+	var found = null;
+	for (var i = 0; i < container.children.length; i++) {
+		var ch = container.children[i];
+		if (isMeasuredPathVector(ch)) {
+			if (found) return found;
+			found = ch;
+		}
+	}
+	return found;
+}
+
+function findLabelInContainer(container) {
+	if (!container) return null;
+	if (container.getPluginData && container.getPluginData("pluginLabel") === "1") return container;
+	if (!container.children) return null;
+	for (var i = 0; i < container.children.length; i++) {
+		var ch = container.children[i];
+		if (ch.getPluginData && ch.getPluginData("pluginLabel") === "1") return ch;
+	}
+	if (typeof container.findAll === "function") {
+		var labels = findLabelsInContainer(container);
+		return labels.length > 0 ? labels[0] : null;
+	}
+	return null;
+}
+
+function getVectorAndLabelFromPluginGroup(group) {
+	return {
+		vector: findLineVectorInContainer(group),
+		pill: findLabelInContainer(group),
+	};
+}
+
+function readLineEntryFromNode(node) {
+	if (!node || !node.getPluginData) return null;
+	return parseLineEntryJson(node.getPluginData(PLUGIN_LINE_ENTRY));
+}
+
+function readLineEntryFromVector(vector) {
+	var entry = readLineEntryFromNode(vector);
+	if (entry) return entry;
+	var group = getPluginLineGroupForVector(vector);
+	if (group) return readLineEntryFromNode(group);
+	return null;
+}
+
+function solidPaintToHex(paint) {
+	if (!paint || paint.type !== "SOLID" || !paint.color) return null;
+	var c = paint.color;
+	var r = Math.round(c.r * 255);
+	var g = Math.round(c.g * 255);
+	var b = Math.round(c.b * 255);
+	return (
+		"#" +
+		[r, g, b]
+			.map(function (x) {
+				var h = x.toString(16);
+				return h.length === 1 ? "0" + h : h;
+			})
+			.join("")
+	);
+}
+
+function getFirstSolidFillHex(node) {
+	if (!node || !("fills" in node) || node.fills === figma.mixed) return null;
+	var fills = node.fills;
+	if (!fills || !fills.length) return null;
+	return solidPaintToHex(fills[0]);
+}
+
+function getFirstSolidStrokeHex(node) {
+	if (!node || !("strokes" in node) || node.strokes === figma.mixed) return null;
+	var strokes = node.strokes;
+	if (!strokes || !strokes.length) return null;
+	return solidPaintToHex(strokes[0]);
+}
+
+function buildEntryFromDiscoveredPair(vector, pill, group) {
+	var textId = null;
+	var fontSize = DEFAULT_UI_SETTINGS.fontSize;
+	if (pill && pill.type === "FRAME" && pill.children) {
+		for (var ci = 0; ci < pill.children.length; ci++) {
+			if (pill.children[ci].type === "TEXT") {
+				textId = pill.children[ci].id;
+				fontSize = pill.children[ci].fontSize || fontSize;
+				break;
+			}
+		}
+	} else if (pill && pill.type === "TEXT") {
+		textId = pill.id;
+		fontSize = pill.fontSize || fontSize;
+	}
+
+	var pathLength = getTotalPathLength(vector);
+	var globalScale = parseFloat(figma.root.getPluginData("globalScale")) || 0;
+	var scaleInfo = resolveScaleForNode(vector, globalScale);
+	var labelHex = (pill && getFirstSolidFillHex(pill)) || DEFAULT_UI_SETTINGS.labelColor;
+	var lineHex = getFirstSolidStrokeHex(vector) || labelHex;
+
+	return {
+		textId: textId,
+		pillId: pill ? pill.id : null,
+		groupId: group ? group.id : null,
+		pxPerCm: scaleInfo.pxPerCm,
+		labelColor: labelHex,
+		lineColor: lineHex,
+		fontSize: fontSize,
+		lastPathLength: pathLength,
+		labelManuallyMoved: true,
+		labelPlacement: DEFAULT_UI_SETTINGS.labelPlacement,
+		lineWidth: vector.strokeWeight || DEFAULT_UI_SETTINGS.lineWidth,
+		pointHeightsByPointIndex: {},
+		elevationsCmByPointIndex: {},
+		pointMarkerIds: [],
+		heightBadgeIds: [],
+		slopeBadgeIds: [],
+		colorIndex: -1,
+	};
+}
+
+async function persistLineEntryToNodes(vectorId, groupId, entry) {
+	var json = JSON.stringify(entry);
+	try {
+		var vector = await figma.getNodeByIdAsync(vectorId);
+		if (vector) vector.setPluginData(PLUGIN_LINE_ENTRY, json);
+	} catch (e) {}
+	if (groupId) {
+		try {
+			var group = await figma.getNodeByIdAsync(groupId);
+			if (group) group.setPluginData(PLUGIN_LINE_ENTRY, json);
+		} catch (e) {}
+	} else {
+		try {
+			var vector2 = await figma.getNodeByIdAsync(vectorId);
+			var grp = vector2 ? getPluginLineGroupForVector(vector2) : null;
+			if (grp) grp.setPluginData(PLUGIN_LINE_ENTRY, json);
+		} catch (e2) {}
+	}
+}
+
+async function registerDiscoveredLine(vector, entry) {
+	await repairMeasuredLineEntry(vector, entry);
+	measuredLines[vector.id] = entry;
+	await persistLineEntryToNodes(vector.id, entry.groupId, entry);
+}
+
+async function repairMeasuredLineEntry(vector, entry) {
+	var changed = false;
+	var pillOk = entry.pillId && (await nodeExists(entry.pillId));
+	if (!pillOk) {
+		var pill = await findLabelForVector(vector);
+		if (pill) {
+			entry.pillId = pill.id;
+			entry.textId = null;
+			if (pill.type === "FRAME" && pill.children) {
+				for (var ci = 0; ci < pill.children.length; ci++) {
+					if (pill.children[ci].type === "TEXT") {
+						entry.textId = pill.children[ci].id;
+						break;
+					}
+				}
+			}
+			pill.setPluginData(PLUGIN_LINE_VECTOR_ID, vector.id);
+			changed = true;
+		}
+	} else {
+		try {
+			var existingPill = await figma.getNodeByIdAsync(entry.pillId);
+			if (existingPill) existingPill.setPluginData(PLUGIN_LINE_VECTOR_ID, vector.id);
+		} catch (e) {}
+	}
+
+	var parent = vector.parent;
+	if (parent && parent.getPluginData && parent.getPluginData("pluginGroup") === "1") {
+		if (entry.groupId !== parent.id) {
+			entry.groupId = parent.id;
+			changed = true;
+		}
+	}
+
+	if (changed) {
+		vector.setPluginData(PLUGIN_LINE_ENTRY, JSON.stringify(entry));
+	}
+	return entry;
+}
+
+async function restoreMeasuredLinesFromIndex() {
+	var savedIndex2 = figma.root.getPluginData("measuredLinesIndex");
+	if (!savedIndex2) return;
+	try {
+		var index = JSON.parse(savedIndex2);
+		for (var i = 0; i < index.length; i++) {
+			var nodeId = index[i];
+			try {
+				var node = await figma.getNodeByIdAsync(nodeId);
+				if (node && node.type === "VECTOR") {
+					var entry = readLineEntryFromVector(node);
+					if (entry) {
+						await repairMeasuredLineEntry(node, entry);
+						measuredLines[nodeId] = entry;
+					}
+				}
+			} catch (e) {}
+		}
+	} catch (e) {}
+}
+
+async function discoverMeasuredLinesFromDocument() {
+	await figma.loadAllPagesAsync();
+	var found = 0;
+	for (var pi = 0; pi < figma.root.children.length; pi++) {
+		var page = figma.root.children[pi];
+		var vectors = page.findAll(function (n) {
+			if (n.type !== "VECTOR" || !isMeasuredPathVector(n)) return false;
+			if (n.getPluginData && n.getPluginData(PLUGIN_LINE_ENTRY)) return true;
+			var grp = getPluginLineGroupForVector(n);
+			return !!(grp && grp.getPluginData && grp.getPluginData(PLUGIN_LINE_ENTRY));
+		});
+		for (var vi = 0; vi < vectors.length; vi++) {
+			var vector = vectors[vi];
+			if (measuredLines[vector.id]) continue;
+			var entry = readLineEntryFromVector(vector);
+			if (!entry) continue;
+			await registerDiscoveredLine(vector, entry);
+			found++;
+		}
+	}
+	if (found > 0) saveMeasuredLinesIndex();
+	return found;
+}
+
+async function discoverMeasuredLinesFromPluginGroups() {
+	await figma.loadAllPagesAsync();
+	var found = 0;
+	for (var pi = 0; pi < figma.root.children.length; pi++) {
+		var page = figma.root.children[pi];
+		var groups = page.findAll(function (n) {
+			return n.getPluginData && n.getPluginData("pluginGroup") === "1";
+		});
+		for (var gi = 0; gi < groups.length; gi++) {
+			var group = groups[gi];
+			var pair = getVectorAndLabelFromPluginGroup(group);
+			if (!pair.vector || measuredLines[pair.vector.id]) continue;
+			var entry = readLineEntryFromNode(group) || readLineEntryFromVector(pair.vector);
+			if (!entry) {
+				if (!pair.pill && !group.getPluginData(PLUGIN_LINE_ENTRY)) continue;
+				entry = buildEntryFromDiscoveredPair(pair.vector, pair.pill, group);
+			}
+			entry.groupId = group.id;
+			await registerDiscoveredLine(pair.vector, entry);
+			found++;
+		}
+	}
+	if (found > 0) saveMeasuredLinesIndex();
+	return found;
+}
+
+async function discoverMeasuredLinesFromLabels() {
+	await figma.loadAllPagesAsync();
+	var found = 0;
+	for (var pi = 0; pi < figma.root.children.length; pi++) {
+		var page = figma.root.children[pi];
+		var labels = page.findAll(function (n) {
+			return n.getPluginData && n.getPluginData("pluginLabel") === "1";
+		});
+		for (var li = 0; li < labels.length; li++) {
+			var pill = labels[li];
+			var parent = pill.parent;
+			var vector = null;
+			var group = null;
+			if (parent && parent.getPluginData && parent.getPluginData("pluginGroup") === "1") {
+				group = parent;
+				vector = findLineVectorInContainer(parent);
+			} else if (parent) {
+				var siblings = listMeasuredPathVectorsInContainer(parent);
+				if (siblings.length === 1) vector = siblings[0];
+				else if (siblings.length > 1) vector = pickClosestVector(siblings, pill);
+			}
+			if (!vector || measuredLines[vector.id]) continue;
+			var entry = readLineEntryFromVector(vector);
+			if (!entry) entry = buildEntryFromDiscoveredPair(vector, pill, group);
+			if (group) entry.groupId = group.id;
+			await registerDiscoveredLine(vector, entry);
+			found++;
+		}
+	}
+	if (found > 0) saveMeasuredLinesIndex();
+	return found;
+}
+
+async function restoreDiscoveredLineAppearance() {
+	var keys = Object.keys(measuredLines);
+	if (keys.length === 0) return;
+	await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+	for (var i = 0; i < keys.length; i++) {
+		var nodeId = keys[i];
+		var entry = measuredLines[nodeId];
+		if (!entry) continue;
+		try {
+			var vNode = await figma.getNodeByIdAsync(nodeId);
+			if (!vNode || vNode.type !== "VECTOR") continue;
+			if (entry.lineColor) {
+				vNode.strokes = [{ type: "SOLID", color: hexToRgb(entry.lineColor) }];
+			}
+			if (entry.lineWidth) vNode.strokeWeight = entry.lineWidth;
+			var lNode = null;
+			if (entry.pillId) lNode = await figma.getNodeByIdAsync(entry.pillId);
+			if (!lNode && entry.textId) lNode = await figma.getNodeByIdAsync(entry.textId);
+			if (lNode) await updateLabel(vNode, lNode, entry, false);
+		} catch (e) {}
+	}
+}
+
+function isCalibrationContainerNode(n) {
+	if (!n || !n.getPluginData) return false;
+	if (n.type !== "FRAME" && n.type !== "GROUP" && n.type !== "SECTION") return false;
+	if (n.getPluginData("pluginGroup") === "1") return false;
+	return true;
+}
+
+function getImmediateCalibrationContainer(node) {
+	var current = node && node.parent;
+	while (current && current.type !== "PAGE" && current.type !== "DOCUMENT") {
+		if (current.getPluginData && current.getPluginData("pluginGroup") === "1") {
+			current = current.parent;
+			continue;
+		}
+		if (isCalibrationContainerNode(current)) return current;
+		current = current.parent;
+	}
+	return null;
+}
+
+async function scanDocumentForNodeScales() {
+	await figma.loadAllPagesAsync();
+	var found = [];
+	var seen = {};
+	for (var pi = 0; pi < figma.root.children.length; pi++) {
+		var page = figma.root.children[pi];
+		var containers = page.findAll(function (n) {
+			if (!isCalibrationContainerNode(n)) return false;
+			var raw = n.getPluginData("nodeScale");
+			return !!(raw && parseFloat(raw) > 0);
+		});
+		for (var ci = 0; ci < containers.length; ci++) {
+			var c = containers[ci];
+			if (seen[c.id]) continue;
+			seen[c.id] = true;
+			found.push({
+				id: c.id,
+				name: c.name || "Frame",
+				pxPerCm: parseFloat(c.getPluginData("nodeScale")),
+			});
+		}
+	}
+	return found;
+}
+
+async function inferFrameScalesFromMeasuredLines() {
+	var keys = Object.keys(measuredLines);
+	for (var i = 0; i < keys.length; i++) {
+		var entry = measuredLines[keys[i]];
+		if (!entry || !(entry.pxPerCm > 0)) continue;
+		try {
+			var vector = await figma.getNodeByIdAsync(keys[i]);
+			if (!vector) continue;
+			var container = getImmediateCalibrationContainer(vector);
+			if (!container) continue;
+			var existing = container.getPluginData("nodeScale");
+			if (existing && parseFloat(existing) > 0) continue;
+			saveNodeScale(container, entry.pxPerCm);
+		} catch (e) {}
+	}
+}
+
+async function discoverNodeScalesFromDocument() {
+	var scanned = await scanDocumentForNodeScales();
+	for (var i = 0; i < scanned.length; i++) {
+		try {
+			var node = await figma.getNodeByIdAsync(scanned[i].id);
+			if (node) saveNodeScale(node, scanned[i].pxPerCm);
+		} catch (e) {}
+	}
+	await inferFrameScalesFromMeasuredLines();
+}
+
+function restoreMissingDocumentPluginData() {
+	var keys = Object.keys(measuredLines);
+	if (keys.length === 0) return;
+
+	var globalScale = parseFloat(figma.root.getPluginData("globalScale"));
+	if (!isFinite(globalScale) || globalScale <= 0) {
+		for (var gi = 0; gi < keys.length; gi++) {
+			var ge = measuredLines[keys[gi]];
+			if (ge && ge.pxPerCm > 0) {
+				saveGlobalScale(ge.pxPerCm);
+				break;
+			}
+		}
+	}
+
+	if (!figma.root.getPluginData("uiSettings")) {
+		var inferred = null;
+		for (var ui = 0; ui < keys.length; ui++) {
+			inferred = uiSettingsFromLineEntry(measuredLines[keys[ui]]);
+			if (inferred) break;
+		}
+		if (!inferred) {
+			var sample = measuredLines[keys[0]];
+			if (sample) {
+				inferred = {
+					colorMode: DEFAULT_UI_SETTINGS.colorMode,
+					lineColor: sample.lineColor || DEFAULT_UI_SETTINGS.lineColor,
+					labelColor: sample.labelColor || DEFAULT_UI_SETTINGS.labelColor,
+					fontSize: sample.fontSize || DEFAULT_UI_SETTINGS.fontSize,
+					labelPlacement: sample.labelPlacement || DEFAULT_UI_SETTINGS.labelPlacement,
+					lineWidth: sample.lineWidth || DEFAULT_UI_SETTINGS.lineWidth,
+					showPointMarkers: DEFAULT_UI_SETTINGS.showPointMarkers,
+					elevationDisplayAtPoints: DEFAULT_UI_SETTINGS.elevationDisplayAtPoints,
+					showHeightBadges: DEFAULT_UI_SETTINGS.showHeightBadges,
+					showDiffBadges: DEFAULT_UI_SETTINGS.showDiffBadges,
+					showSlopeBadges: DEFAULT_UI_SETTINGS.showSlopeBadges,
+				};
+			}
+		}
+		if (inferred) saveUiSettings(inferred);
+	}
+}
+
 async function init() {
 	// 1. Restore global scale from document root
 	var savedScale = figma.root.getPluginData("globalScale");
 	var savedIndex = figma.root.getPluginData("lineColorIndex");
 	if (savedIndex) lineColorIndex = parseInt(savedIndex) || 0;
 
-	// 2. Restore tracked lines — stored as a JSON index on the root
-	var savedIndex2 = figma.root.getPluginData("measuredLinesIndex");
-	if (savedIndex2) {
-		try {
-			var index = JSON.parse(savedIndex2); // array of nodeIds
-			for (var i = 0; i < index.length; i++) {
-				var nodeId = index[i];
-				try {
-					var node = await figma.getNodeByIdAsync(nodeId);
-					if (node && node.type === "VECTOR") {
-						var raw = node.getPluginData("lineEntry");
-						if (raw) {
-							var entry = JSON.parse(raw);
-							ensureEntryDefaults(entry);
-							measuredLines[nodeId] = entry;
-						}
-					}
-				} catch (e) {
-					/* node deleted, skip */
-				}
-			}
-		} catch (e) {}
-	}
+	// 2. Restore tracked lines from root index, then scan copied layers (lineEntry on vectors)
+	await restoreMeasuredLinesFromIndex();
+	await discoverMeasuredLinesFromDocument();
+	await discoverMeasuredLinesFromPluginGroups();
+	await discoverMeasuredLinesFromLabels();
+	await discoverNodeScalesFromDocument();
+	restoreMissingDocumentPluginData();
+	// Lines may carry frame pxPerCm while frame nodeScale was lost on paste — infer again after global restore.
+	await inferFrameScalesFromMeasuredLines();
+	await restoreDiscoveredLineAppearance();
 	await scheduleSyncElevationVisuals();
 
 	// 3. Send restored state + calibrations list to UI
@@ -260,14 +871,9 @@ function saveLineColorIndex() {
 
 function saveMeasuredLine(nodeId, entry) {
 	ensureEntryDefaults(entry);
+	attachUiPrefsToEntry(entry);
 	measuredLines[nodeId] = entry;
-	// Save entry on the vector node itself
-	try {
-		figma.getNodeByIdAsync(nodeId).then(function (node) {
-			if (node) node.setPluginData("lineEntry", JSON.stringify(entry));
-		});
-	} catch (e) {}
-	// Update root index
+	persistLineEntryToNodes(nodeId, entry.groupId, entry);
 	saveMeasuredLinesIndex();
 }
 
@@ -287,9 +893,18 @@ function removeMeasuredLine(nodeId) {
 	}
 	try {
 		figma.getNodeByIdAsync(nodeId).then(function (node) {
-			if (node) node.setPluginData("lineEntry", "");
+			if (node) node.setPluginData(PLUGIN_LINE_ENTRY, "");
+			var grp = node ? getPluginLineGroupForVector(node) : null;
+			if (grp) grp.setPluginData(PLUGIN_LINE_ENTRY, "");
 		});
 	} catch (e) {}
+	if (old && old.groupId) {
+		try {
+			figma.getNodeByIdAsync(old.groupId).then(function (grp) {
+				if (grp) grp.setPluginData(PLUGIN_LINE_ENTRY, "");
+			});
+		} catch (e2) {}
+	}
 	saveMeasuredLinesIndex();
 }
 
@@ -323,34 +938,13 @@ function saveNodeScale(node, pxPerCm) {
 }
 
 async function getNodeScalesList() {
-	var raw = figma.root.getPluginData("nodeScalesIndex");
-	var index = [];
-	try {
-		index = raw ? JSON.parse(raw) : [];
-	} catch (e) {
-		return [];
-	}
-
-	// Always read pxPerCm live from the node itself — never trust the stale index value
-	var result = [];
-	var cleanIndex = [];
-	for (var i = 0; i < index.length; i++) {
-		try {
-			var n = await figma.getNodeByIdAsync(index[i].id);
-			if (n) {
-				var livePx = parseFloat(n.getPluginData("nodeScale"));
-				if (livePx > 0) {
-					result.push({ id: index[i].id, name: n.name, pxPerCm: livePx });
-					cleanIndex.push({ id: index[i].id, name: n.name, pxPerCm: livePx });
-				}
-			}
-			// node deleted — drop from index silently
-		} catch (e) {}
-	}
-	// Write back cleaned index (removes deleted nodes)
+	// Scan layers for nodeScale (survives copy/paste); index alone is not enough in a new file.
+	var result = await scanDocumentForNodeScales();
+	var cleanIndex = result.map(function (item) {
+		return { id: item.id, name: item.name };
+	});
 	figma.root.setPluginData("nodeScalesIndex", JSON.stringify(cleanIndex));
 
-	// Prepend global — always read live from root
 	var globalScale = figma.root.getPluginData("globalScale");
 	if (globalScale && parseFloat(globalScale) > 0) {
 		result.unshift({ id: "global", name: "Global", pxPerCm: parseFloat(globalScale) });
@@ -897,6 +1491,7 @@ figma.ui.onmessage = async function (msg) {
 			var text = pillResult.text;
 
 			groupParent.appendChild(pill);
+			linkPillToVector(pill, node.id);
 			positionLabelParallel(node, pill, labelPlacement);
 			movedLabelIds.push(pill.id);
 
@@ -2428,6 +3023,10 @@ async function createPill(labelText, fontSize, bgHex) {
 	pill.setPluginData("pluginLabel", "1");
 
 	return { pill: pill, text: text };
+}
+
+function linkPillToVector(pill, vectorId) {
+	if (pill && vectorId) pill.setPluginData(PLUGIN_LINE_VECTOR_ID, vectorId);
 }
 
 // Update an existing pill's text + color
